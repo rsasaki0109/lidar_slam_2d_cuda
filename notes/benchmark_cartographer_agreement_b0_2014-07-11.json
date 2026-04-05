@@ -1,0 +1,25 @@
+{
+  "bag": "lidar_slam_2d/data/cartographer_backpack2d/b0-2014-07-11-10-58-16.bag",
+  "slamx_run_short": "runs/slamx_backpack2d_short",
+  "slamx_max_scans": 300,
+  "cartographer_record_bag": "runs/carto_recorded.bag",
+  "cartographer_pipeline": "ros-melodic cartographer_ros offline_backpack_2d.launch no_rviz:=true (Docker)",
+  "gt_csv_windowed": "runs/cartographer_traj_s300_window.csv",
+  "window_stamp_ns": [1405076296472768100, 1405076304406301500],
+  "eval_max_dt_ms": 50,
+  "agreement_vs_cartographer_pseudo_gt": {
+    "align_se2": {
+      "ok": true,
+      "n": 258,
+      "rmse_m": 1.5926748605933359,
+      "mean_m": 1.4172623255025183
+    },
+    "no_align": {
+      "ok": true,
+      "n": 258,
+      "rmse_m": 3.088156440930577,
+      "mean_m": 2.5718990194707794
+    }
+  },
+  "comment": "Cartographer trajectory used as pseudo-GT. Full-bag slamx replay (runs/slamx_backpack2d_full) was started for apples-to-apples comparison; eval when trajectory.json exists."
+}

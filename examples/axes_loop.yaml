@@ -1,0 +1,5 @@
+axes:
+  - key: slam.loop_detection.enabled
+    values: [false, true]
+  - key: slam.local_matching.type
+    values: [correlative, icp]

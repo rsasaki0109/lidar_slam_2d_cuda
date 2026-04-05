@@ -1,0 +1,35 @@
+slam:
+  preprocess:
+    max_range: 30.0
+    stride: 2
+  local_matching:
+    type: correlative
+    correlative_grid:
+      linear_step_m: 0.05
+      angular_step_deg: 2.0
+      linear_window_m: 0.6
+      angular_window_deg: 25.0
+      sigma_hit_m: 0.12
+    icp:
+      max_iterations: 20
+      max_correspondence_dist_m: 0.5
+      min_correspondences: 30
+      trim_fraction: 0.2
+  submap:
+    max_submap_scans: 25
+    downsample_stride: 2
+  optimize_every_n_keyframes: 5
+  loop_detection:
+    enabled: false
+    search_radius_m: 1.5
+    min_separation_nodes: 30
+    max_candidates: 3
+    accept_score: -0.25
+
+map:
+  occupancy_grid:
+    resolution_m: 0.05
+    size_x_m: 40.0
+    size_y_m: 40.0
+    origin_x_m: -20.0
+    origin_y_m: -20.0

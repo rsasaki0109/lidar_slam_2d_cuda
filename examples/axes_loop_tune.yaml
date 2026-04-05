@@ -1,0 +1,9 @@
+axes:
+  - key: slam.loop_detection.enabled
+    values: [true]
+  - key: slam.local_matching.type
+    values: [icp]
+  - key: slam.loop_detection.search_radius_m
+    values: [1.0, 1.5, 2.0]
+  - key: slam.loop_detection.accept_score
+    values: [-0.6, -0.4, -0.25]
