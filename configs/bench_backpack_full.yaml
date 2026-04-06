@@ -1,5 +1,5 @@
-# Full-sequence replay (~5k+ scans): fewer pose-graph optimizations than bench_fast for wall time.
-# Local quality is the same as bench_fast; global map consistency may differ slightly.
+# Full backpack_2d bag (~5.5k horizontal scans): cap pose-graph solver work per step so replay finishes.
+# Same local pipeline as bench_fast; longer optimize interval + scipy max_nfev cap.
 slam:
   preprocess:
     max_range: 20.0
@@ -14,7 +14,14 @@ slam:
   submap:
     max_submap_scans: 10
     downsample_stride: 4
-  optimize_every_n_keyframes: 200
+  optimize_every_n_keyframes: 80
+  optimize_adaptive_from_node: 1800
+  optimize_min_interval_for_long_runs: 280
+  # Global bundle adjustment on ~5000 2D poses dominates wall time; skip after this node index.
+  pose_graph_skip_optimization_from_node: 2600
+  pose_graph:
+    max_iterations: 50
+    max_nfev_cap: 40000
   loop_detection:
     enabled: false
 

@@ -24,5 +24,15 @@
       "no_align": { "ok": true, "n": 1953, "rmse_m": 16.97674594646509, "mean_m": 15.274270085185815 }
     }
   },
-  "full_sequence_note": "Unbounded slamx replay on this bag (~5522 scans) with configs/bench_fast.yaml has been observed to spend extreme wall time past ~5k steps (telemetry ~6058 lines) without finishing, likely pose-graph optimization cost. configs/bench_backpack_full.yaml (optimize_every_n_keyframes: 200) did not finish within multi-hour windows in the same environment. For now extended benchmarks use --max-scans in the 2k range (minutes to ~40 min) rather than full length."
+  "runs_full_bag_slamx": {
+    "config": "configs/bench_backpack_full.yaml",
+    "slamx_run": "runs/slamx_backpack2d_full_capped",
+    "slamx_poses": 5522,
+    "gt_csv": "runs/cartographer_traj.csv",
+    "notes": "Pose graph: max_nfev cap + adaptive optimize interval + skip global BA after node 2600 (see YAML). Finishes ~24 min wall time vs hours without; agreement RMSE is worse than short-segment runs because tail relies on scan matcher without global refinement.",
+    "agreement_vs_cartographer_pseudo_gt": {
+      "align_se2": { "ok": true, "n": 5438, "rmse_m": 17.13896669894818, "mean_m": 14.83578877128141 },
+      "no_align": { "ok": true, "n": 5438, "rmse_m": 42.13929351347846, "mean_m": 37.01923260724674 }
+    }
+  }
 }

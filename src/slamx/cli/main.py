@@ -14,6 +14,7 @@ from slamx.cli import datasets
 from slamx.cli import report_lib
 from slamx.cli import sweep_lib
 from slamx.config import deep_merge, load_config
+from slamx.core.backend.pose_graph import PoseGraphConfig
 from slamx.core.frontend.local_slam import LocalSlamConfig, LocalSlamEngine
 from slamx.core.io import iter_scans_jsonl, list_laserscan_topics, list_topics_by_suffix
 from slamx.core.io.bag import iter_scans_bag1, iter_scans_db3
@@ -44,6 +45,11 @@ def _engine_from_config(cfg: dict[str, Any], telemetry: JsonlTelemetry | None) -
     submap = slam.get("submap", {})
     opt_every = int(slam.get("optimize_every_n_keyframes", 10))
     loop = slam.get("loop_detection", {}) or {}
+    pg = slam.get("pose_graph", {}) or {}
+    cap_raw = pg.get("max_nfev_cap")
+    adapt_from = slam.get("optimize_adaptive_from_node")
+    adapt_min = slam.get("optimize_min_interval_for_long_runs", 200)
+    skip_opt_from = slam.get("pose_graph_skip_optimization_from_node")
 
     from slamx.core.preprocess.pipeline import PreprocessConfig
     from slamx.core.local_matching.correlative import CorrelativeGridConfig
@@ -75,6 +81,15 @@ def _engine_from_config(cfg: dict[str, Any], telemetry: JsonlTelemetry | None) -
             downsample_stride=int(submap.get("downsample_stride", 2)),
         ),
         optimize_every_n_keyframes=opt_every,
+        pose_graph=PoseGraphConfig(
+            max_iterations=int(pg.get("max_iterations", 50)),
+            max_nfev_cap=int(cap_raw) if cap_raw is not None else None,
+        ),
+        optimize_adaptive_from_node=int(adapt_from) if adapt_from is not None else None,
+        optimize_min_interval_for_long_runs=int(adapt_min),
+        pose_graph_skip_optimization_from_node=(
+            int(skip_opt_from) if skip_opt_from is not None else None
+        ),
         loop=HeuristicLoopConfig(
             enabled=bool(loop.get("enabled", False)),
             search_radius_m=float(loop.get("search_radius_m", 1.5)),

@@ -22,7 +22,10 @@ class Edge:
 
 @dataclass
 class PoseGraphConfig:
+    # Budget multiplier: max_nfev ≈ max_iterations * n_edges * 3 (scipy least_squares, trf).
+    # Without a cap this grows ~O(n^2) as odometry chains lengthen, stalling long replays.
     max_iterations: int = 50
+    max_nfev_cap: int | None = None
 
 
 @dataclass
@@ -64,11 +67,17 @@ class PoseGraph:
         rms0 = float(np.sqrt(np.mean(r0 * r0))) if r0.size else 0.0
         maxabs0 = float(np.max(np.abs(r0))) if r0.size else 0.0
 
+        n_edges = max(1, len(self.edges))
+        max_nfev = int(self.cfg.max_iterations) * n_edges * 3
+        if self.cfg.max_nfev_cap is not None:
+            max_nfev = min(max_nfev, int(self.cfg.max_nfev_cap))
+        max_nfev = max(max_nfev, 32)
+
         r = least_squares(
             residuals,
             x0,
             method="trf",
-            max_nfev=self.cfg.max_iterations * max(1, len(self.edges)) * 3,
+            max_nfev=max_nfev,
         )
         xf = r.x.reshape(-1, 3)
         self.poses = [Pose2(float(row[0]), float(row[1]), float(row[2])) for row in xf]

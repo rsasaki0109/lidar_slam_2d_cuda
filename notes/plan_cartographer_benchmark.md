@@ -10,7 +10,7 @@
   - **300 スキャン**: align **RMSE 約 1.59 m**（n=258）、`--no-align` **約 3.09 m**。
   - **2000 スキャン**（実用的な延長区間）: align **RMSE 約 7.69 m**（n=1953）、`--no_align` **約 16.98 m**（長区間では slamx と Cartographer の形状差が支配的になりやすい）。
   - 集計 JSON: `lidar_slam_2d/notes/benchmark_cartographer_agreement_b0_2014-07-11.json`
-- **次の一手**: この bag は水平約 **5522** フレーム。`configs/bench_fast.yaml` で **`--max-scans` 無し／5000 付近**の `replay` は **壁時計で極端に重く**、同一セッション内で `trajectory.json` まで到達しなかった例がある（恐らく pose graph の最適化コスト）。**全区間の apple-to-apple** は、`optimize_every_n_keyframes` の更なる間引き・CLI での途中保存・別バックエンド等の **実装側対応**が現実的。当面は **`--max-scans 2000` 前後**で延長評価するか、**300 で回帰確認**と割り切る。
+- **全区間 slamx（実装対応後）**: `scipy.least_squares` の **変数数・残差数が袋長に伴って爆発**するのが主因だった。対策として YAML で **`slam.pose_graph.max_nfev_cap`**、`optimize_adaptive_from_node` / `optimize_min_interval_for_long_runs`、および大規模時 **`pose_graph_skip_optimization_from_node`**（指定ノード以降は **グローバル BA を省略**しスキャンマッチのオドメのみ）を追加。**`configs/bench_backpack_full.yaml`** で約 **5522 姿勢・~24 分**程度まで `replay` 完了を確認（Tail は BA 無しのため Cartographer 擬似 GT との RMSE は悪化しうる）。計測値は `notes/benchmark_cartographer_agreement_b0_2014-07-11.json` の `runs_full_bag_slamx`。
 
 ## 確認済み事実
 
@@ -21,7 +21,7 @@
 
 ## 未確認/要確認項目
 
-- **bench_fast** のまま全区間 `replay` を安定完了させる（または代替 config / 実装で同一 bag 全区間を現実時間で回せるようにする）
+- **全区間を BA 省略なしで**現実時間内に回す（スパースヤコビアン・ウィンドウ化・階層最適化など）
 - `map` / `base_link` 以外のフレーム名になるデータセットでは `--parent` / `--child` の再確認
 - **真の GT** が無い限り、数値は **「Cartographer にどれだけ寄せたか」**の読みに留まる
 
@@ -57,9 +57,24 @@ env -u PYTHONPATH .venv/bin/slamx replay \
 
 `trajectory.json` の先頭・末尾 `stamp_ns` で `runs/cartographer_traj.csv` を切り出し（例: `runs/cartographer_traj_s2k_window.csv`）、`eval ate` に渡す。
 
-### A''. slamx（全区間・現状は非推奨 / 未完成になりやすい）
+### A''. slamx（全区間・`bench_backpack_full.yaml`）
 
-`configs/bench_backpack_full.yaml`（`optimize_every_n_keyframes: 200`）や `bench_fast` の **無制限** `replay` は長時間ブロックしうる。上記 A' のような **明示的 `--max-scans`** を推奨。
+```bash
+cd lidar_slam_2d
+env -u PYTHONPATH .venv/bin/slamx replay \
+  data/cartographer_backpack2d/b0-2014-07-11-10-58-16.bag \
+  --topic horizontal_laser_2d \
+  --config lidar_slam_2d/configs/bench_backpack_full.yaml \
+  --out lidar_slam_2d/runs/slamx_backpack2d_full_capped \
+  --deterministic --seed 0 \
+  --no-write-map
+```
+
+- `slam.pose_graph` … `max_nfev_cap` で各 BA の scipy 予算を上限化
+- `optimize_adaptive_*` … 長系列で最適化間隔を自動延長
+- `pose_graph_skip_optimization_from_node` … 指定ノード以降は **グローバル BA スキップ**（速度優先・精度は特に後半で劣化しうる）
+
+短区間の回帰には引き続き **`configs/bench_fast.yaml` + `--max-scans`** が無難。
 
 ### B. Cartographer（Docker / Melodic）
 

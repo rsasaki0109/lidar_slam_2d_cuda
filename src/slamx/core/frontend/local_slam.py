@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from slamx.core.backend.pose_graph import Edge, PoseGraph
+from slamx.core.backend.pose_graph import Edge, PoseGraph, PoseGraphConfig
 from slamx.core.local_matching.correlative import CorrelativeGridConfig, CorrelativeScanMatcher
 from slamx.core.local_matching.icp import IcpConfig, IcpScanMatcher
 from slamx.core.local_matching.protocol import ScanMatcher
@@ -24,6 +24,12 @@ class LocalSlamConfig:
     icp: IcpConfig = field(default_factory=IcpConfig)
     submap: SubmapBuilderConfig = field(default_factory=SubmapBuilderConfig)
     optimize_every_n_keyframes: int = 10
+    pose_graph: PoseGraphConfig = field(default_factory=PoseGraphConfig)
+    # When node >= optimize_adaptive_from_node, spacing between graph solves is at least
+    # optimize_min_interval_for_long_runs (keeps long offline replays tractable).
+    optimize_adaptive_from_node: int | None = None
+    optimize_min_interval_for_long_runs: int = 200
+    pose_graph_skip_optimization_from_node: int | None = None
     loop: HeuristicLoopConfig = field(default_factory=HeuristicLoopConfig)
 
 
@@ -35,7 +41,7 @@ class LocalSlamEngine:
 
     _matcher: ScanMatcher | None = field(default=None, repr=False)
     _submaps: SubmapBuilder | None = field(default=None, repr=False)
-    graph: PoseGraph = field(default_factory=PoseGraph)
+    graph: PoseGraph = field(init=False)
 
     _stamps: list[int | None] = field(default_factory=list)
     _scan_window: list[tuple[Pose2, LaserScan]] = field(default_factory=list)
@@ -44,6 +50,7 @@ class LocalSlamEngine:
     _heuristic_loop: HeuristicLoopDetector | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
+        self.graph = PoseGraph(cfg=self.cfg.pose_graph)
         mt = (self.cfg.matcher_type or "correlative").lower()
         if mt in {"correlative", "grid", "csm"}:
             self._matcher = CorrelativeScanMatcher(self.cfg.correlative)
@@ -174,11 +181,24 @@ class LocalSlamEngine:
                         {"node": node, "i": r.i, "j": r.j, "score": r.score},
                     )
 
-        if self.cfg.optimize_every_n_keyframes > 0 and (node + 1) % self.cfg.optimize_every_n_keyframes == 0:
-            opt = self.graph.optimize()
-            if self.telemetry:
-                self.telemetry.emit("optimization", {"node": node, **opt})
-            self._last_pose = self.graph.poses[-1]
+        opt_every = self.cfg.optimize_every_n_keyframes
+        if (
+            self.cfg.optimize_adaptive_from_node is not None
+            and opt_every > 0
+            and node >= int(self.cfg.optimize_adaptive_from_node)
+        ):
+            opt_every = max(opt_every, int(self.cfg.optimize_min_interval_for_long_runs))
+
+        if opt_every > 0 and (node + 1) % opt_every == 0:
+            skip_global = (
+                self.cfg.pose_graph_skip_optimization_from_node is not None
+                and node >= int(self.cfg.pose_graph_skip_optimization_from_node)
+            )
+            if not skip_global:
+                opt = self.graph.optimize()
+                if self.telemetry:
+                    self.telemetry.emit("optimization", {"node": node, **opt})
+                self._last_pose = self.graph.poses[-1]
 
         return accepted
 
