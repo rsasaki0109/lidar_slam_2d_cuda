@@ -1,0 +1,33 @@
+# Reference-port from Cartographer public 2D backpack Lua (Apache-2.0).
+# Mapping table: notes/cartographer_backpack2d_port.md
+slam:
+  preprocess:
+    max_range: 30.0
+    # Cartographer voxel_filter_size 0.025 has no 1:1 knob; coarse downsampling.
+    stride: 4
+  local_matching:
+    type: correlative
+    correlative_grid:
+      linear_step_m: 0.05
+      angular_step_deg: 2.0
+      # trajectory_builder_2d.lua real_time_correlative_scan_matcher (when enabled).
+      linear_window_m: 0.1
+      angular_window_deg: 20.0
+      sigma_hit_m: 0.15
+  submap:
+    # trajectory_builder_2d submaps.num_range_data is 90; window semantics differ — middle ground.
+    max_submap_scans: 40
+    downsample_stride: 2
+  # pose_graph.lua optimize_every_n_nodes == 90 (keyframes vs pose graph nodes: not identical).
+  optimize_every_n_keyframes: 90
+  loop_detection:
+    enabled: false
+
+map:
+  occupancy_grid:
+    # trajectory_builder_2d submaps.grid_options_2d.resolution
+    resolution_m: 0.05
+    size_x_m: 60.0
+    size_y_m: 60.0
+    origin_x_m: -30.0
+    origin_y_m: -30.0
