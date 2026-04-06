@@ -1,0 +1,27 @@
+# Full-sequence replay (~5k+ scans): fewer pose-graph optimizations than bench_fast for wall time.
+# Local quality is the same as bench_fast; global map consistency may differ slightly.
+slam:
+  preprocess:
+    max_range: 20.0
+    stride: 8
+  local_matching:
+    type: icp
+    icp:
+      max_iterations: 5
+      max_correspondence_dist_m: 1.0
+      min_correspondences: 20
+      trim_fraction: 0.2
+  submap:
+    max_submap_scans: 10
+    downsample_stride: 4
+  optimize_every_n_keyframes: 200
+  loop_detection:
+    enabled: false
+
+map:
+  occupancy_grid:
+    resolution_m: 0.1
+    size_x_m: 60.0
+    size_y_m: 60.0
+    origin_x_m: -30.0
+    origin_y_m: -30.0
