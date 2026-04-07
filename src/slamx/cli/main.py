@@ -47,6 +47,7 @@ def _engine_from_config(cfg: dict[str, Any], telemetry: JsonlTelemetry | None) -
     loop = slam.get("loop_detection", {}) or {}
     pg = slam.get("pose_graph", {}) or {}
     cap_raw = pg.get("max_nfev_cap")
+    opt_win = pg.get("optimization_window")
     adapt_from = slam.get("optimize_adaptive_from_node")
     adapt_min = slam.get("optimize_min_interval_for_long_runs", 200)
     skip_opt_from = slam.get("pose_graph_skip_optimization_from_node")
@@ -84,6 +85,7 @@ def _engine_from_config(cfg: dict[str, Any], telemetry: JsonlTelemetry | None) -
         pose_graph=PoseGraphConfig(
             max_iterations=int(pg.get("max_iterations", 50)),
             max_nfev_cap=int(cap_raw) if cap_raw is not None else None,
+            optimization_window=int(opt_win) if opt_win is not None else None,
         ),
         optimize_adaptive_from_node=int(adapt_from) if adapt_from is not None else None,
         optimize_min_interval_for_long_runs=int(adapt_min),

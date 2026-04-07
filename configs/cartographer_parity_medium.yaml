@@ -1,0 +1,35 @@
+# A: short/medium offline runs (≈300–2000 scans) — Cartographer-port local params, full pose graph,
+# heuristic loop closure. No BA skip / no adaptive thinning (those hurt parity-style agreement).
+slam:
+  preprocess:
+    max_range: 30.0
+    stride: 4
+  local_matching:
+    type: correlative
+    correlative_grid:
+      linear_step_m: 0.05
+      angular_step_deg: 2.0
+      linear_window_m: 0.1
+      angular_window_deg: 20.0
+      sigma_hit_m: 0.15
+  submap:
+    max_submap_scans: 40
+    downsample_stride: 2
+  optimize_every_n_keyframes: 90
+  loop_detection:
+    enabled: true
+    search_radius_m: 2.5
+    min_separation_nodes: 45
+    max_candidates: 4
+    accept_score: -0.28
+  pose_graph:
+    max_iterations: 50
+    max_nfev_cap: 200000
+
+map:
+  occupancy_grid:
+    resolution_m: 0.05
+    size_x_m: 60.0
+    size_y_m: 60.0
+    origin_x_m: -30.0
+    origin_y_m: -30.0
