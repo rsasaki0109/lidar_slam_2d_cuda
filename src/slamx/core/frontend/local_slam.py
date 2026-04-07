@@ -31,6 +31,7 @@ class LocalSlamConfig:
     optimize_min_interval_for_long_runs: int = 200
     pose_graph_skip_optimization_from_node: int | None = None
     loop: HeuristicLoopConfig = field(default_factory=HeuristicLoopConfig)
+    loop_ref_submap_scans: int = 10  # accumulate this many scans for loop closure reference
     loop_correlative: CorrelativeGridConfig = field(default_factory=lambda: CorrelativeGridConfig(
         linear_step_m=0.05,
         angular_step_deg=2.0,
@@ -55,6 +56,7 @@ class LocalSlamEngine:
     _last_pose: Pose2 | None = field(default=None, init=False)
     _ref_points_by_node: list[np.ndarray] = field(default_factory=list, repr=False)
     _loop_matcher: ScanMatcher | None = field(default=None, repr=False)
+    _loop_refiner: ScanMatcher | None = field(default=None, repr=False)
     _heuristic_loop: HeuristicLoopDetector | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
@@ -67,6 +69,7 @@ class LocalSlamEngine:
         else:
             raise ValueError(f"Unknown matcher_type: {self.cfg.matcher_type}")
         self._loop_matcher = CorrelativeScanMatcher(self.cfg.loop_correlative)
+        self._loop_refiner = IcpScanMatcher(self.cfg.icp)
         self._submaps = SubmapBuilder(self.cfg.submap)
         self._heuristic_loop = HeuristicLoopDetector(self.cfg.loop)
 
@@ -122,13 +125,18 @@ class LocalSlamEngine:
         self._stamps.append(scan.stamp_ns)
         self._last_pose = accepted
         self._scan_window.append((accepted, scan_p))
-        # store reference points for loop closure / future matching: downsampled scan in map frame
-        pts_m = transform_points_xy(accepted.as_se2(), scan_p.points_xy())
-        if pts_m.size and pts_m.shape[0] > 0:
-            pts_m = pts_m[:: max(1, int(self.cfg.submap.downsample_stride))]
+        # store reference points for loop closure: local submap from recent scans
+        stride = max(1, int(self.cfg.submap.downsample_stride))
+        n_sub = max(1, self.cfg.loop_ref_submap_scans)
+        acc_ref: list[np.ndarray] = []
+        for pose, sc in self._scan_window[-n_sub:]:
+            pts = sc.points_xy()
+            if pts.size:
+                acc_ref.append(transform_points_xy(pose.as_se2(), pts)[::stride])
+        if acc_ref:
+            self._ref_points_by_node.append(np.concatenate(acc_ref, axis=0))
         else:
-            pts_m = np.zeros((0, 2), dtype=np.float64)
-        self._ref_points_by_node.append(pts_m)
+            self._ref_points_by_node.append(np.zeros((0, 2), dtype=np.float64))
 
         if len(self._scan_window) > self.cfg.submap.max_submap_scans:
             self._scan_window.pop(0)
@@ -141,6 +149,7 @@ class LocalSlamEngine:
         if self._heuristic_loop is not None and self._loop_matcher is not None:
             lrs = self._heuristic_loop.detect_and_match(
                 matcher=self._loop_matcher,
+                refiner=self._loop_refiner,
                 node_id=node,
                 pose_map=accepted,
                 scan=scan_p,

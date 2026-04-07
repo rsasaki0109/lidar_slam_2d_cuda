@@ -26,6 +26,7 @@ class HeuristicLoopConfig:
     min_separation_nodes: int = 30
     max_candidates: int = 3
     accept_score: float = -0.25  # matcher score threshold (higher is better)
+    icp_accept_rms: float = 0.15  # ICP RMS threshold for acceptance (when refiner present)
 
 
 class HeuristicLoopDetector:
@@ -38,6 +39,7 @@ class HeuristicLoopDetector:
         self,
         *,
         matcher: ScanMatcher,
+        refiner: ScanMatcher | None = None,
         node_id: int,
         pose_map: Pose2,
         scan: LaserScan,
@@ -75,17 +77,31 @@ class HeuristicLoopDetector:
             if ref.size == 0:
                 continue
             mr = matcher.match(scan=scan, prediction_map=pose_map, ref_points_xy_map=ref)
-            # we interpret matching as refined pose for current node; relative constraint to j is:
-            rel = poses[j].inverse().compose(mr.pose_map)
-            accepted = bool(mr.score >= float(self.cfg.accept_score))
+
+            final_pose = mr.pose_map
+            final_score = float(mr.score)
+            diag: dict = {"ref_points": int(ref.shape[0]), "matcher": mr.diagnostics}
+
+            if refiner is not None and final_score >= float(self.cfg.accept_score):
+                # ICP refinement using correlative result as initial guess
+                icp_mr = refiner.match(scan=scan, prediction_map=mr.pose_map, ref_points_xy_map=ref)
+                icp_rms = icp_mr.diagnostics.get("icp", {}).get("final_rms")
+                diag["icp"] = icp_mr.diagnostics
+                final_pose = icp_mr.pose_map
+                final_score = float(icp_mr.score)
+                accepted = icp_rms is not None and icp_rms <= float(self.cfg.icp_accept_rms)
+            else:
+                accepted = refiner is None and bool(final_score >= float(self.cfg.accept_score))
+
+            rel = poses[j].inverse().compose(final_pose)
             out.append(
                 LoopClosureResult(
                     i=j,
                     j=node_id,
-                    score=float(mr.score),
+                    score=final_score,
                     accepted=accepted,
                     rel_ij=rel if accepted else None,
-                    diagnostics={"ref_points": int(ref.shape[0]), "matcher": mr.diagnostics},
+                    diagnostics=diag,
                 )
             )
         return out

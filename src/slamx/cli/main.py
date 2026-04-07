@@ -97,6 +97,7 @@ def _engine_from_config(cfg: dict[str, Any], telemetry: JsonlTelemetry | None) -
             min_separation_nodes=int(loop.get("min_separation_nodes", 30)),
             max_candidates=int(loop.get("max_candidates", 3)),
             accept_score=float(loop.get("accept_score", -0.25)),
+            icp_accept_rms=float(loop.get("icp_accept_rms", 0.15)),
         ),
         loop_correlative=CorrelativeGridConfig(
             linear_step_m=float(loop_corr.get("linear_step_m", 0.05)),
