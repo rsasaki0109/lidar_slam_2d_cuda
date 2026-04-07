@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+from scipy.spatial import cKDTree
 
 from slamx.core.types import LaserScan, MatchResult, Pose2, transform_points_xy
 
@@ -52,7 +53,9 @@ class CorrelativeScanMatcher:
             )
 
         ref = np.asarray(ref_points_xy_map, dtype=np.float64).reshape(-1, 2)
+        tree = cKDTree(ref)
         sig = max(self.cfg.sigma_hit_m, 1e-6)
+        inv_2sig2 = 1.0 / (2.0 * sig * sig)
 
         lin = np.arange(
             -self.cfg.linear_window_m,
@@ -67,37 +70,54 @@ class CorrelativeScanMatcher:
             )
         )
 
-        best: tuple[float, Pose2] | None = None
-        candidates: list[tuple[float, float, float, float]] = []
+        # Pre-compute translation offsets grid: (N_lin^2, 2)
+        dxs, dys = np.meshgrid(lin, lin)
+        offsets = np.column_stack([dxs.ravel(), dys.ravel()])  # (N_lin^2, 2)
+        n_trans = offsets.shape[0]
+        n_pts = pts_s.shape[0]
 
-        for dy in lin:
-            for dx in lin:
-                for dth in ang:
-                    cand = Pose2(
-                        prediction_map.x + dx,
-                        prediction_map.y + dy,
-                        prediction_map.theta + dth,
-                    )
-                    T_ms = cand.as_se2()
-                    pts_m = transform_points_xy(T_ms, pts_s)
+        px, py = prediction_map.x, prediction_map.y
+        base_theta = prediction_map.theta
 
-                    # Score: mean log-likelihood under NN distance to refs (soft)
-                    diff = pts_m[:, None, :] - ref[None, :, :]
-                    d2 = np.sum(diff * diff, axis=2)
-                    nn = np.min(d2, axis=1)
-                    score = float(np.mean(-nn / (2 * sig**2)))
+        all_scores: list[np.ndarray] = []
+        all_thetas: list[np.ndarray] = []
 
-                    candidates.append((cand.x, cand.y, cand.theta, score))
-                    if best is None or score > best[0]:
-                        best = (score, cand)
+        for dth in ang:
+            theta = base_theta + float(dth)
+            c, s = np.cos(theta), np.sin(theta)
+            # Rotate scan points once per angle
+            pts_rot = pts_s @ np.array([[c, -s], [s, c]], dtype=np.float64).T  # (N_pts, 2)
+            # Translate by all offsets: (N_trans, N_pts, 2)
+            pts_batch = pts_rot[None, :, :] + (offsets + np.array([px, py]))[: , None, :]
+            pts_flat = pts_batch.reshape(-1, 2)  # (N_trans * N_pts, 2)
+            nn_dist, _ = tree.query(pts_flat, k=1)
+            nn_d2 = (nn_dist * nn_dist).reshape(n_trans, n_pts)
+            scores = np.mean(-nn_d2 * inv_2sig2, axis=1)  # (N_trans,)
+            all_scores.append(scores)
+            all_thetas.append(np.full(n_trans, theta))
 
-        assert best is not None
-        # stable sort by score for telemetry
-        candidates.sort(key=lambda t: t[3], reverse=True)
-        top_k = candidates[: min(50, len(candidates))]
+        all_scores_arr = np.concatenate(all_scores)   # (N_total,)
+        all_thetas_arr = np.concatenate(all_thetas)    # (N_total,)
+        all_xy = np.tile(offsets + np.array([px, py]), (len(ang), 1))  # (N_total, 2)
+
+        best_idx = int(np.argmax(all_scores_arr))
+        best_score = float(all_scores_arr[best_idx])
+        best_pose = Pose2(float(all_xy[best_idx, 0]), float(all_xy[best_idx, 1]),
+                          float(all_thetas_arr[best_idx]))
+
+        # Top-k candidates for telemetry
+        top_k_n = min(50, len(all_scores_arr))
+        top_idxs = np.argpartition(all_scores_arr, -top_k_n)[-top_k_n:]
+        top_idxs = top_idxs[np.argsort(all_scores_arr[top_idxs])[::-1]]
+        top_k = [
+            (float(all_xy[i, 0]), float(all_xy[i, 1]),
+             float(all_thetas_arr[i]), float(all_scores_arr[i]))
+            for i in top_idxs
+        ]
+
         return MatchResult(
-            pose_map=best[1],
-            score=best[0],
+            pose_map=best_pose,
+            score=best_score,
             candidates=top_k,
             diagnostics={"grid": {"lin": lin.size, "ang": ang.size}},
         )

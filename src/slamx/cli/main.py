@@ -45,6 +45,7 @@ def _engine_from_config(cfg: dict[str, Any], telemetry: JsonlTelemetry | None) -
     submap = slam.get("submap", {})
     opt_every = int(slam.get("optimize_every_n_keyframes", 10))
     loop = slam.get("loop_detection", {}) or {}
+    loop_corr = loop.get("correlative_grid", {}) or {}
     pg = slam.get("pose_graph", {}) or {}
     cap_raw = pg.get("max_nfev_cap")
     adapt_from = slam.get("optimize_adaptive_from_node")
@@ -96,6 +97,13 @@ def _engine_from_config(cfg: dict[str, Any], telemetry: JsonlTelemetry | None) -
             min_separation_nodes=int(loop.get("min_separation_nodes", 30)),
             max_candidates=int(loop.get("max_candidates", 3)),
             accept_score=float(loop.get("accept_score", -0.25)),
+        ),
+        loop_correlative=CorrelativeGridConfig(
+            linear_step_m=float(loop_corr.get("linear_step_m", 0.05)),
+            angular_step_deg=float(loop_corr.get("angular_step_deg", 2.0)),
+            linear_window_m=float(loop_corr.get("linear_window_m", 0.5)),
+            angular_window_deg=float(loop_corr.get("angular_window_deg", 30.0)),
+            sigma_hit_m=float(loop_corr.get("sigma_hit_m", 0.25)),
         ),
     )
     return LocalSlamEngine(cfg=engine_cfg, telemetry=telemetry)

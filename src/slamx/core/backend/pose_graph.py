@@ -50,18 +50,27 @@ class PoseGraph:
             dtype=np.float64,
         ).reshape(-1)
 
+        # Pre-extract edge data for vectorised residuals
+        ei = np.array([e.i for e in self.edges], dtype=np.intp)
+        ej = np.array([e.j for e in self.edges], dtype=np.intp)
+        rel = np.array([[e.rel.x, e.rel.y, e.rel.theta] for e in self.edges], dtype=np.float64)
+
         def residuals(uv: np.ndarray) -> np.ndarray:
             P = uv.reshape(-1, 3)
-            res: list[float] = []
-            for e in self.edges:
-                pi, pj = P[e.i], P[e.j]
-                Ti = Pose2(float(pi[0]), float(pi[1]), float(pi[2]))
-                Tj = Pose2(float(pj[0]), float(pj[1]), float(pj[2]))
-                pred = Ti.inverse().compose(Tj)
-                res.append(pred.x - e.rel.x)
-                res.append(pred.y - e.rel.y)
-                res.append(_wrap_pi(pred.theta - e.rel.theta))
-            return np.asarray(res, dtype=np.float64)
+            pi = P[ei]  # (E, 3)
+            pj = P[ej]  # (E, 3)
+            ci = np.cos(pi[:, 2])
+            si = np.sin(pi[:, 2])
+            dx = pj[:, 0] - pi[:, 0]
+            dy = pj[:, 1] - pi[:, 1]
+            pred_x = ci * dx + si * dy
+            pred_y = -si * dx + ci * dy
+            pred_th = pj[:, 2] - pi[:, 2]
+            res = np.empty((len(self.edges), 3), dtype=np.float64)
+            res[:, 0] = pred_x - rel[:, 0]
+            res[:, 1] = pred_y - rel[:, 1]
+            res[:, 2] = np.arctan2(np.sin(pred_th - rel[:, 2]), np.cos(pred_th - rel[:, 2]))
+            return res.reshape(-1)
 
         r0 = residuals(x0)
         rms0 = float(np.sqrt(np.mean(r0 * r0))) if r0.size else 0.0

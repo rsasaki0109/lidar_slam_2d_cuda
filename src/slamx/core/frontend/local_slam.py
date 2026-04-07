@@ -31,6 +31,13 @@ class LocalSlamConfig:
     optimize_min_interval_for_long_runs: int = 200
     pose_graph_skip_optimization_from_node: int | None = None
     loop: HeuristicLoopConfig = field(default_factory=HeuristicLoopConfig)
+    loop_correlative: CorrelativeGridConfig = field(default_factory=lambda: CorrelativeGridConfig(
+        linear_step_m=0.05,
+        angular_step_deg=2.0,
+        linear_window_m=0.5,
+        angular_window_deg=30.0,
+        sigma_hit_m=0.25,
+    ))
 
 
 @dataclass
@@ -47,6 +54,7 @@ class LocalSlamEngine:
     _scan_window: list[tuple[Pose2, LaserScan]] = field(default_factory=list)
     _last_pose: Pose2 | None = field(default=None, init=False)
     _ref_points_by_node: list[np.ndarray] = field(default_factory=list, repr=False)
+    _loop_matcher: ScanMatcher | None = field(default=None, repr=False)
     _heuristic_loop: HeuristicLoopDetector | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
@@ -58,6 +66,7 @@ class LocalSlamEngine:
             self._matcher = IcpScanMatcher(self.cfg.icp)
         else:
             raise ValueError(f"Unknown matcher_type: {self.cfg.matcher_type}")
+        self._loop_matcher = CorrelativeScanMatcher(self.cfg.loop_correlative)
         self._submaps = SubmapBuilder(self.cfg.submap)
         self._heuristic_loop = HeuristicLoopDetector(self.cfg.loop)
 
@@ -129,9 +138,9 @@ class LocalSlamEngine:
         )
         self._emit_match_detail(node, mr, top_candidates=mr.candidates[:10])
 
-        if self._heuristic_loop is not None and self._matcher is not None:
+        if self._heuristic_loop is not None and self._loop_matcher is not None:
             lrs = self._heuristic_loop.detect_and_match(
-                matcher=self._matcher,
+                matcher=self._loop_matcher,
                 node_id=node,
                 pose_map=accepted,
                 scan=scan_p,

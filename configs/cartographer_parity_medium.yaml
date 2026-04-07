@@ -18,10 +18,16 @@ slam:
   optimize_every_n_keyframes: 90
   loop_detection:
     enabled: true
-    search_radius_m: 2.5
+    search_radius_m: 4.0
     min_separation_nodes: 45
     max_candidates: 4
-    accept_score: -0.28
+    accept_score: -3.5
+    correlative_grid:
+      linear_step_m: 0.05
+      angular_step_deg: 2.0
+      linear_window_m: 0.5
+      angular_window_deg: 30.0
+      sigma_hit_m: 0.25
   pose_graph:
     max_iterations: 50
     max_nfev_cap: 200000
