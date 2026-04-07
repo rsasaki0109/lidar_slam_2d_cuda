@@ -26,8 +26,6 @@ class PoseGraphConfig:
     # Without a cap this grows ~O(n^2) as odometry chains lengthen, stalling long replays.
     max_iterations: int = 50
     max_nfev_cap: int | None = None
-    # Optimize only the last N poses; earlier poses stay fixed (sliding window). None = full graph.
-    optimization_window: int | None = None
 
 
 @dataclass
@@ -47,47 +45,29 @@ class PoseGraph:
         if len(self.poses) <= 1:
             return {"success": True, "cost": 0.0, "message": "single pose"}
 
-        n = len(self.poses)
-        win = self.cfg.optimization_window
-        if win is None or win <= 0 or win >= n:
-            start = 0
-        else:
-            start = n - int(win)
-
-        fixed = [Pose2(p.x, p.y, p.theta) for p in self.poses[:start]]
-
-        def pose_from(uv: np.ndarray, node_id: int) -> Pose2:
-            if node_id < start:
-                return fixed[node_id]
-            row = uv.reshape(-1, 3)[node_id - start]
-            return Pose2(float(row[0]), float(row[1]), float(row[2]))
+        x0 = np.array(
+            [[p.x, p.y, p.theta] for p in self.poses],
+            dtype=np.float64,
+        ).reshape(-1)
 
         def residuals(uv: np.ndarray) -> np.ndarray:
+            P = uv.reshape(-1, 3)
             res: list[float] = []
             for e in self.edges:
-                if e.i < start and e.j < start:
-                    continue
-                Ti = pose_from(uv, e.i)
-                Tj = pose_from(uv, e.j)
+                pi, pj = P[e.i], P[e.j]
+                Ti = Pose2(float(pi[0]), float(pi[1]), float(pi[2]))
+                Tj = Pose2(float(pj[0]), float(pj[1]), float(pj[2]))
                 pred = Ti.inverse().compose(Tj)
                 res.append(pred.x - e.rel.x)
                 res.append(pred.y - e.rel.y)
                 res.append(_wrap_pi(pred.theta - e.rel.theta))
             return np.asarray(res, dtype=np.float64)
 
-        x0 = np.array(
-            [[p.x, p.y, p.theta] for p in self.poses[start:n]],
-            dtype=np.float64,
-        ).reshape(-1)
-
         r0 = residuals(x0)
         rms0 = float(np.sqrt(np.mean(r0 * r0))) if r0.size else 0.0
         maxabs0 = float(np.max(np.abs(r0))) if r0.size else 0.0
 
-        active_edges = sum(
-            1 for e in self.edges if not (e.i < start and e.j < start)
-        )
-        n_edges = max(1, active_edges if start > 0 else len(self.edges))
+        n_edges = max(1, len(self.edges))
         max_nfev = int(self.cfg.max_iterations) * n_edges * 3
         if self.cfg.max_nfev_cap is not None:
             max_nfev = min(max_nfev, int(self.cfg.max_nfev_cap))
@@ -100,19 +80,11 @@ class PoseGraph:
             max_nfev=max_nfev,
         )
         xf = r.x.reshape(-1, 3)
-        new_poses: list[Pose2] = []
-        for idx in range(n):
-            if idx < start:
-                new_poses.append(fixed[idx])
-            else:
-                row = xf[idx - start]
-                new_poses.append(Pose2(float(row[0]), float(row[1]), float(row[2])))
-        self.poses = new_poses
+        self.poses = [Pose2(float(row[0]), float(row[1]), float(row[2])) for row in xf]
 
         rf = residuals(r.x)
         rmsf = float(np.sqrt(np.mean(rf * rf))) if rf.size else 0.0
         maxabsf = float(np.max(np.abs(rf))) if rf.size else 0.0
-        msg_extra = "" if start == 0 else f" (window start_node={start})"
         return {
             "success": bool(r.success),
             "cost": float(r.cost),
@@ -120,6 +92,5 @@ class PoseGraph:
             "residual_rms_after": rmsf,
             "residual_maxabs_before": maxabs0,
             "residual_maxabs_after": maxabsf,
-            "message": str(r.message) + msg_extra,
-            "optimization_window_start": int(start),
+            "message": str(r.message),
         }
