@@ -39,7 +39,7 @@ BENCHMARK_CARDS = [
         label="Backpack 300 scans",
         reference_label="bench_fast",
         reference_path=ROOT / "runs" / "slamx_backpack2d_short",
-        slamx_label="slamx parity",
+        slamx_label="lidar_slam_2d parity",
         slamx_path=ROOT / "runs" / "slamx_parity_medium_s300",
         gt_path=ROOT / "runs" / "cartographer_traj_s300_window.csv",
     ),
@@ -47,7 +47,7 @@ BENCHMARK_CARDS = [
         label="Backpack 2k scans",
         reference_label="bench_fast",
         reference_path=ROOT / "runs" / "slamx_backpack2d_2k",
-        slamx_label="slamx parity",
+        slamx_label="lidar_slam_2d parity",
         slamx_path=ROOT / "runs" / "slamx_parity_noloop_s2k",
         gt_path=ROOT / "runs" / "cartographer_traj_s2k_window.csv",
     ),
@@ -55,7 +55,7 @@ BENCHMARK_CARDS = [
         label="IILABS loop 2k",
         reference_label="Cartographer sampled",
         reference_path=ROOT / "runs" / "iilabs_loop_carto_at_slamx_s2k.csv",
-        slamx_label="slamx best",
+        slamx_label="lidar_slam_2d best",
         slamx_path=ROOT / "runs" / "iilabs_loop_s2k_refinegrid_top3_fallback_mid",
         gt_path=ROOT
         / "data"
@@ -70,7 +70,7 @@ BENCHMARK_CARDS = [
         label="IILABS slippage full",
         reference_label="Cartographer sampled",
         reference_path=ROOT / "runs" / "iilabs_slippage_carto_at_slamx.csv",
-        slamx_label="slamx best",
+        slamx_label="lidar_slam_2d best",
         slamx_path=ROOT / "runs" / "iilabs_slippage_hybrid_refdense_cv_s2_refinegrid",
         gt_path=ROOT
         / "data"
@@ -176,11 +176,11 @@ def _benchmark_summary_svg(cards: list[BenchmarkCard]) -> str:
 
     parts = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" role="img" aria-labelledby="title desc">',
-        '<title id="title">slamx benchmark summary</title>',
-        '<desc id="desc">A public benchmark summary comparing reference trajectories against slamx results across backpack and IILABS datasets.</desc>',
+        '<title id="title">lidar_slam_2d benchmark summary</title>',
+        '<desc id="desc">A public benchmark summary comparing reference trajectories against lidar_slam_2d results across backpack and IILABS datasets.</desc>',
         '<defs><linearGradient id="bg" x1="0" x2="1" y1="0" y2="1"><stop offset="0%" stop-color="#0b1220"/><stop offset="100%" stop-color="#111827"/></linearGradient></defs>',
         '<rect width="100%" height="100%" fill="url(#bg)"/>',
-        '<text x="60" y="78" font-size="42" font-family="Inter,Arial,sans-serif" font-weight="700" fill="#f8fafc">slamx benchmark summary</text>',
+        '<text x="60" y="78" font-size="42" font-family="Inter,Arial,sans-serif" font-weight="700" fill="#f8fafc">lidar_slam_2d benchmark summary</text>',
         '<text x="60" y="116" font-size="20" font-family="Inter,Arial,sans-serif" fill="#cbd5e1">Lower align RMSE is better. Backpack numbers use Cartographer pseudo GT; IILABS uses provided ground truth.</text>',
     ]
 
@@ -262,14 +262,14 @@ def _trajectory_overlay_svg(panels: list[OverlayPanel]) -> str:
 
     parts = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" role="img" aria-labelledby="title desc">',
-        '<title id="title">slamx trajectory gallery</title>',
-        '<desc id="desc">Overlay panels showing aligned slamx trajectories against reference trajectories across backpack and IILABS datasets.</desc>',
+        '<title id="title">lidar_slam_2d trajectory gallery</title>',
+        '<desc id="desc">Overlay panels showing aligned lidar_slam_2d trajectories against reference trajectories across backpack and IILABS datasets.</desc>',
         '<defs><linearGradient id="bg2" x1="0" x2="1" y1="0" y2="1"><stop offset="0%" stop-color="#ffffff"/><stop offset="100%" stop-color="#eef2ff"/></linearGradient></defs>',
         '<rect width="100%" height="100%" fill="url(#bg2)"/>',
         '<text x="60" y="78" font-size="42" font-family="Inter,Arial,sans-serif" font-weight="700" fill="#0f172a">Trajectory overlays</text>',
-        '<text x="60" y="116" font-size="20" font-family="Inter,Arial,sans-serif" fill="#475569">slamx trajectories are aligned in SE(2) to the reference path for visual comparison.</text>',
+        '<text x="60" y="116" font-size="20" font-family="Inter,Arial,sans-serif" fill="#475569">lidar_slam_2d trajectories are aligned in SE(2) to the reference path for visual comparison.</text>',
         '<rect x="60" y="130" width="14" height="14" rx="7" fill="#2563eb"/>',
-        '<text x="84" y="142" font-size="16" font-family="Inter,Arial,sans-serif" fill="#0f172a">slamx</text>',
+        '<text x="84" y="142" font-size="16" font-family="Inter,Arial,sans-serif" fill="#0f172a">lidar_slam_2d</text>',
         '<rect x="150" y="130" width="14" height="14" rx="7" fill="#94a3b8"/>',
         '<text x="174" y="142" font-size="16" font-family="Inter,Arial,sans-serif" fill="#0f172a">reference</text>',
     ]

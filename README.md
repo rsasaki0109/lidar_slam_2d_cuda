@@ -1,10 +1,10 @@
-# slamx
+# lidar_slam_2d
 
 Modern 2D LiDAR SLAM experiment platform with a ROS-free core and a CLI-first workflow for replay, evaluation, and benchmark iteration.
 
-![slamx benchmark summary](docs/assets/benchmark-summary.svg)
+![lidar_slam_2d benchmark summary](docs/assets/benchmark-summary.svg)
 
-![slamx trajectory gallery](docs/assets/trajectory-gallery.svg)
+![lidar_slam_2d trajectory gallery](docs/assets/trajectory-gallery.svg)
 
 ## Why this repo is worth publishing now
 
@@ -19,6 +19,8 @@ pip install -e .
 slamx replay examples/fixture_scans.jsonl --out runs/demo --no-write-map
 slamx eval ate runs/demo --gt runs/cartographer_traj_s300_window.csv
 ```
+
+The published project name is **`lidar_slam_2d`**. The CLI command remains **`slamx`** for now.
 
 Optional ROS bag support:
 

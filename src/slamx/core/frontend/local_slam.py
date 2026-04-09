@@ -32,6 +32,12 @@ class LocalSlamConfig:
     pose_graph_skip_optimization_from_node: int | None = None
     loop: HeuristicLoopConfig = field(default_factory=HeuristicLoopConfig)
     loop_ref_submap_scans: int = 10  # accumulate this many scans for loop closure reference
+    loop_icp: IcpConfig = field(default_factory=lambda: IcpConfig(
+        max_iterations=30,
+        max_correspondence_dist_m=2.0,
+        min_correspondences=20,
+        trim_fraction=0.3,
+    ))
     loop_correlative: CorrelativeGridConfig = field(default_factory=lambda: CorrelativeGridConfig(
         linear_step_m=0.05,
         angular_step_deg=2.0,
@@ -69,7 +75,7 @@ class LocalSlamEngine:
         else:
             raise ValueError(f"Unknown matcher_type: {self.cfg.matcher_type}")
         self._loop_matcher = CorrelativeScanMatcher(self.cfg.loop_correlative)
-        self._loop_refiner = IcpScanMatcher(self.cfg.icp)
+        self._loop_refiner = IcpScanMatcher(self.cfg.loop_icp)
         self._submaps = SubmapBuilder(self.cfg.submap)
         self._heuristic_loop = HeuristicLoopDetector(self.cfg.loop)
 
