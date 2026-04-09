@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>slamx | CLI-first 2D LiDAR SLAM experiments</title>
+    <meta
+      name="description"
+      content="slamx is a CLI-first, ROS-free 2D LiDAR SLAM experiment platform with Cartographer parity work and IILABS benchmark notes."
+    />
+    <link rel="stylesheet" href="assets/site.css" />
+  </head>
+  <body>
+    <header class="hero">
+      <div class="hero__inner">
+        <p class="eyebrow">slamx</p>
+        <h1>CLI-first 2D LiDAR SLAM experiments, published as a lightweight public benchmark log.</h1>
+        <p class="lead">
+          slamx is a ROS-free core for offline SLAM replay, evaluation, and scan-matcher iteration.
+          The current public slice focuses on Cartographer parity work, IILABS benchmark generalization,
+          and a small set of visuals that are easy to reuse in the repository README.
+        </p>
+        <div class="hero__chips">
+          <span>Python 3.10+</span>
+          <span>CLI-first</span>
+          <span>ROS bag support</span>
+          <span>Benchmark-driven</span>
+        </div>
+      </div>
+    </header>
+
+    <main class="page">
+      <section class="section">
+        <div class="section__copy">
+          <h2>What is here today</h2>
+          <p>
+            This site is intentionally small: one benchmark summary, one trajectory gallery, and the
+            core commands needed to reproduce the workflow locally. The underlying repo still contains
+            active experimental branches, but the public-facing surface stays focused on the clean story.
+          </p>
+        </div>
+        <div class="cards">
+          <article class="card">
+            <h3>Backpack parity</h3>
+            <p>
+              Early Cartographer backpack_2d segments moved from meter-scale drift to sub-meter
+              agreement by switching to Cartographer-style local matching and simpler pose graph handling.
+            </p>
+          </article>
+          <article class="card">
+            <h3>IILABS generalization</h3>
+            <p>
+              The current front-end already beats Cartographer sampled baselines on multiple IILABS
+              sequences. The remaining open case is <code>ramp</code>.
+            </p>
+          </article>
+          <article class="card">
+            <h3>Publishing style</h3>
+            <p>
+              All visuals are generated as SVG assets so the same files work on GitHub Pages and inside
+              the repository README.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="section__copy">
+          <h2>Benchmark snapshot</h2>
+          <p>
+            The summary below compares a reference trajectory against the current best slamx result on
+            each highlighted slice. Lower align RMSE is better.
+          </p>
+        </div>
+        <figure class="figure">
+          <img src="assets/benchmark-summary.svg" alt="slamx benchmark summary card" />
+        </figure>
+      </section>
+
+      <section class="section">
+        <div class="section__copy">
+          <h2>Trajectory gallery</h2>
+          <p>
+            These overlays align the slamx trajectory to the reference path for visual comparison.
+            Backpack panels use Cartographer pseudo GT; IILABS panels use the provided ground truth.
+          </p>
+        </div>
+        <figure class="figure">
+          <img src="assets/trajectory-gallery.svg" alt="slamx trajectory overlays" />
+        </figure>
+      </section>
+
+      <section class="section section--split">
+        <div class="section__copy">
+          <h2>Minimal local workflow</h2>
+          <pre><code>pip install -e .
+slamx replay examples/fixture_scans.jsonl --out runs/demo --no-write-map
+slamx eval ate runs/demo --gt runs/cartographer_traj_s300_window.csv</code></pre>
+        </div>
+        <div class="section__copy">
+          <h2>Current status</h2>
+          <p>
+            The public story is already strong enough to publish: backpack parity is substantially
+            improved and several IILABS sequences are ahead of the reference. The one open technical
+            thread is the <code>ramp</code> sequence, where pitch-robust preprocessing helps a little
+            but does not yet close the full 2k gap.
+          </p>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <p>Built from tracked benchmark artifacts in the repository. GitHub Pages can serve this directory directly via Actions.</p>
+    </footer>
+  </body>
+</html>
