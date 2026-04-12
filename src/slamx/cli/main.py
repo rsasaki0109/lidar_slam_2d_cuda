@@ -17,7 +17,8 @@ from slamx.config import deep_merge, load_config
 from slamx.core.backend.pose_graph import PoseGraphConfig
 from slamx.core.frontend.local_slam import LocalSlamConfig, LocalSlamEngine
 from slamx.core.io import iter_scans_jsonl, list_laserscan_topics, list_topics_by_suffix
-from slamx.core.io.bag import iter_scans_bag1, iter_scans_db3
+from slamx.core.io.bag import iter_imu_bag, iter_pointcloud2_bag, iter_scans_bag1, iter_scans_db3
+from slamx.core.preprocess.virtual_scan import VirtualScanConfig, pointcloud_to_virtual_scan
 from slamx.core.map_io import export_trajectory_csv, save_occupancy_yaml, save_pgm, save_trajectory_json
 from slamx.core.observability import JsonlTelemetry
 from slamx.core.map_representation import OccupancyGridConfig, OccupancyGridMap
@@ -56,11 +57,14 @@ def _engine_from_config(cfg: dict[str, Any], telemetry: JsonlTelemetry | None) -
     adapt_from = slam.get("optimize_adaptive_from_node")
     adapt_min = slam.get("optimize_min_interval_for_long_runs", 200)
     skip_opt_from = slam.get("pose_graph_skip_optimization_from_node")
+    pitch_comp = slam.get("pitch_compensation", {}) or {}
+    scan_context_cfg = slam.get("scan_context", {}) or {}
 
     from slamx.core.preprocess.pipeline import PreprocessConfig
     from slamx.core.local_matching.correlative import CorrelativeGridConfig
     from slamx.core.local_matching.hybrid import HybridFallbackConfig, HybridRefinementConfig
     from slamx.core.local_matching.icp import IcpConfig
+    from slamx.core.local_matching.scan_context import ScanContextConfig
     from slamx.core.submap.builder import SubmapBuilderConfig
     from slamx.core.loop_detection.heuristic import HeuristicLoopConfig
 
@@ -75,6 +79,9 @@ def _engine_from_config(cfg: dict[str, Any], telemetry: JsonlTelemetry | None) -
             gradient_mask_max_range=preprocess.get("gradient_mask_max_range"),
             gradient_mask_window=int(preprocess.get("gradient_mask_window", 0)),
             gradient_mask_ratio=preprocess.get("gradient_mask_ratio"),
+            pitch_compensation_enabled=bool(pitch_comp.get("enabled", False)),
+            pitch_sensor_height_m=float(pitch_comp.get("sensor_height_m", 0.5)),
+            pitch_floor_margin=float(pitch_comp.get("floor_margin", 1.5)),
         ),
         matcher_type=matcher_type,
         correlative=CorrelativeGridConfig(
@@ -93,6 +100,8 @@ def _engine_from_config(cfg: dict[str, Any], telemetry: JsonlTelemetry | None) -
             trim_fraction=float(icp.get("trim_fraction", 0.2)),
             range_weight_mode=str(icp.get("range_weight_mode", "none")),
             range_weight_min_m=float(icp.get("range_weight_min_m", 1.0)),
+            icp_mode=str(icp.get("icp_mode", "point")),
+            normal_k=int(icp.get("normal_k", 5)),
         ),
         hybrid_refinement=HybridRefinementConfig(
             top_k=int(hybrid_refinement.get("top_k", 1)),
@@ -140,6 +149,8 @@ def _engine_from_config(cfg: dict[str, Any], telemetry: JsonlTelemetry | None) -
             max_correspondence_dist_m=float(loop_icp_cfg.get("max_correspondence_dist_m", 2.0)),
             min_correspondences=int(loop_icp_cfg.get("min_correspondences", 20)),
             trim_fraction=float(loop_icp_cfg.get("trim_fraction", 0.3)),
+            icp_mode=str(loop_icp_cfg.get("icp_mode", "point")),
+            normal_k=int(loop_icp_cfg.get("normal_k", 5)),
         ),
         loop_correlative=CorrelativeGridConfig(
             linear_step_m=float(loop_corr.get("linear_step_m", 0.05)),
@@ -148,6 +159,14 @@ def _engine_from_config(cfg: dict[str, Any], telemetry: JsonlTelemetry | None) -
             angular_window_deg=float(loop_corr.get("angular_window_deg", 30.0)),
             sigma_hit_m=float(loop_corr.get("sigma_hit_m", 0.25)),
         ),
+        scan_context=ScanContextConfig(
+            n_sectors=int(scan_context_cfg.get("n_sectors", 60)),
+            max_range=float(scan_context_cfg.get("max_range", 10.0)),
+        ),
+        scan_context_enabled=bool(scan_context_cfg.get("enabled", False)),
+        scan_context_trigger_score=float(scan_context_cfg.get("trigger_score", -0.03)),
+        scan_context_top_k=int(scan_context_cfg.get("top_k", 3)),
+        scan_context_min_separation_nodes=int(scan_context_cfg.get("min_separation_nodes", 50)),
     )
     return LocalSlamEngine(cfg=engine_cfg, telemetry=telemetry)
 
@@ -171,6 +190,14 @@ def replay(
     max_scans: Annotated[
         int | None, typer.Option("--max-scans", help="Stop after N scans (for quick bench)")
     ] = None,
+    pointcloud_topic: Annotated[
+        str | None,
+        typer.Option("--pointcloud-topic", help="PointCloud2 topic; enables virtual 2D scan mode"),
+    ] = None,
+    imu_topic: Annotated[
+        str | None,
+        typer.Option("--imu-topic", help="IMU topic for pitch compensation"),
+    ] = None,
 ) -> None:
     """Re-run SLAM offline (JSONL or ROS bags)."""
     apply_determinism(DeterminismContext(enabled=deterministic, seed=seed))
@@ -191,6 +218,15 @@ def replay(
 
     telem = JsonlTelemetry(out / "telemetry.jsonl")
     eng = _engine_from_config(cfg, telem)
+
+    # Pre-read IMU samples if --imu-topic is specified
+    if imu_topic is not None:
+        if input_path.suffix.lower() not in {".db3", ".bag"}:
+            raise typer.BadParameter("--imu-topic requires a .db3 or .bag input")
+        imu_samples = list(iter_imu_bag(input_path, topic=imu_topic))
+        eng.set_imu_buffer(imu_samples)
+        typer.echo(f"Loaded {len(imu_samples)} IMU samples from {imu_topic}")
+
     final_optimize_at_end = bool(cfg.get("slam", {}).get("final_optimize_at_end", False))
     ogm: OccupancyGridMap | None = None
     if write_map:
@@ -205,7 +241,24 @@ def replay(
             )
         )
 
-    if input_path.suffix.lower() in {".jsonl"}:
+    # Build virtual scan config from YAML if present
+    vs_cfg_dict = cfg.get("slam", {}).get("virtual_scan", {}) or {}
+    vs_cfg = VirtualScanConfig(
+        z_min=float(vs_cfg_dict.get("z_min", -0.1)),
+        z_max=float(vs_cfg_dict.get("z_max", 0.3)),
+        angle_min_deg=float(vs_cfg_dict.get("angle_min_deg", -180.0)),
+        angle_max_deg=float(vs_cfg_dict.get("angle_max_deg", 180.0)),
+        angular_resolution_deg=float(vs_cfg_dict.get("angular_resolution_deg", 0.5)),
+        max_range=float(vs_cfg_dict.get("max_range", 30.0)),
+    )
+
+    use_pointcloud = pointcloud_topic is not None
+    if use_pointcloud:
+        if input_path.suffix.lower() not in {".db3", ".bag"}:
+            raise typer.BadParameter("--pointcloud-topic requires a .db3 or .bag input")
+        clouds = iter_pointcloud2_bag(input_path, topic=pointcloud_topic)
+        scans = (pointcloud_to_virtual_scan(c, vs_cfg) for c in clouds)
+    elif input_path.suffix.lower() in {".jsonl"}:
         scans = iter_scans_jsonl(input_path)
     elif input_path.suffix.lower() in {".db3"}:
         scans = iter_scans_db3(input_path, topic=topic)
