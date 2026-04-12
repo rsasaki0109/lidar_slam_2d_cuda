@@ -13,9 +13,12 @@ from slamx.core.local_matching.hybrid import (
 )
 from slamx.core.local_matching.icp import IcpConfig, IcpScanMatcher
 from slamx.core.local_matching.protocol import ScanMatcher
+from slamx.core.local_matching.scan_context import ScanContextConfig, ScanContextDescriptor
+from slamx.core.io.bag import ImuSample
 from slamx.core.loop_detection.heuristic import HeuristicLoopConfig, HeuristicLoopDetector
 from slamx.core.loop_detection.null_loop import LoopDetector, NullLoopDetector
 from slamx.core.observability import JsonlTelemetry
+from slamx.core.preprocess.imu_utils import quaternion_to_pitch
 from slamx.core.preprocess.pipeline import PreprocessConfig, preprocess_scan
 from slamx.core.submap.builder import SubmapBuilder, SubmapBuilderConfig
 from slamx.core.types import LaserScan, Pose2, Submap, transform_points_xy
@@ -54,6 +57,12 @@ class LocalSlamConfig:
         angular_window_deg=30.0,
         sigma_hit_m=0.25,
     ))
+    # Scan context relocalization
+    scan_context: ScanContextConfig = field(default_factory=ScanContextConfig)
+    scan_context_enabled: bool = False
+    scan_context_trigger_score: float = -0.03
+    scan_context_top_k: int = 3
+    scan_context_min_separation_nodes: int = 50
 
 
 @dataclass
@@ -65,6 +74,11 @@ class LocalSlamEngine:
     _matcher: ScanMatcher | None = field(default=None, repr=False)
     _submaps: SubmapBuilder | None = field(default=None, repr=False)
     graph: PoseGraph = field(init=False)
+
+    _imu_buffer: list[ImuSample] = field(default_factory=list)
+
+    _scan_context: ScanContextDescriptor | None = field(default=None, repr=False)
+    _descriptors: list[np.ndarray] = field(default_factory=list, repr=False)
 
     _stamps: list[int | None] = field(default_factory=list)
     _scan_window: list[tuple[Pose2, LaserScan]] = field(default_factory=list)
@@ -95,6 +109,33 @@ class LocalSlamEngine:
         self._loop_refiner = IcpScanMatcher(self.cfg.loop_icp)
         self._submaps = SubmapBuilder(self.cfg.submap)
         self._heuristic_loop = HeuristicLoopDetector(self.cfg.loop)
+        if self.cfg.scan_context_enabled:
+            self._scan_context = ScanContextDescriptor(self.cfg.scan_context)
+
+    def set_imu_buffer(self, samples: list[ImuSample]) -> None:
+        """Set pre-read IMU samples (sorted by timestamp) for pitch compensation."""
+        self._imu_buffer = sorted(samples, key=lambda s: s.stamp_ns)
+
+    def _lookup_pitch(self, stamp_ns: int | None) -> float | None:
+        """Find the nearest IMU sample by timestamp and return its pitch angle."""
+        if not self._imu_buffer or stamp_ns is None:
+            return None
+        import bisect
+        stamps = [s.stamp_ns for s in self._imu_buffer]
+        idx = bisect.bisect_left(stamps, stamp_ns)
+        # pick the closest of idx-1 and idx
+        best = None
+        best_diff = float("inf")
+        for candidate in (idx - 1, idx):
+            if 0 <= candidate < len(self._imu_buffer):
+                diff = abs(self._imu_buffer[candidate].stamp_ns - stamp_ns)
+                if diff < best_diff:
+                    best_diff = diff
+                    best = candidate
+        if best is None:
+            return None
+        qx, qy, qz, qw = self._imu_buffer[best].orientation_quat
+        return quaternion_to_pitch(qx, qy, qz, qw)
 
     @property
     def poses(self) -> list[Pose2]:
@@ -106,7 +147,8 @@ class LocalSlamEngine:
 
     def handle_scan(self, scan: LaserScan) -> Pose2:
         assert self._matcher is not None and self._submaps is not None
-        scan_p = preprocess_scan(scan, self.cfg.preprocess)
+        pitch = self._lookup_pitch(scan.stamp_ns)
+        scan_p = preprocess_scan(scan, self.cfg.preprocess, pitch_rad=pitch)
 
         if self._last_pose is None:
             init = Pose2(0.0, 0.0, 0.0)
@@ -116,6 +158,8 @@ class LocalSlamEngine:
             self._last_rel = None
             self._scan_window.append((init, scan_p))
             self._ref_points_by_node.append(np.zeros((0, 2), dtype=np.float64))
+            if self._scan_context is not None:
+                self._descriptors.append(self._scan_context.compute(scan_p))
             self._emit_keyframe(node, init, scan_p, prediction=init, match_score=0.0, jump=0.0)
             return init
 
@@ -128,6 +172,26 @@ class LocalSlamEngine:
             ref_points_xy_map=ref,
         )
         accepted = mr.pose_map
+        original_score = mr.score
+
+        # --- Scan context relocalization ---
+        if self._scan_context is not None:
+            current_desc = self._scan_context.compute(scan_p)
+            sc_replaced = False
+            if (
+                self.cfg.scan_context_enabled
+                and mr.score < self.cfg.scan_context_trigger_score
+                and len(self._descriptors) > 0
+            ):
+                sc_replaced = self._try_scan_context_relocalization(
+                    scan_p=scan_p,
+                    current_desc=current_desc,
+                    original_score=mr.score,
+                    mr=mr,
+                )
+                if sc_replaced:
+                    accepted = mr.pose_map
+            self._descriptors.append(current_desc)
 
         jump = float(
             np.hypot(accepted.x - prediction.x, accepted.y - prediction.y)
@@ -246,6 +310,93 @@ class LocalSlamEngine:
                     self._last_rel = self.graph.poses[-2].inverse().compose(self.graph.poses[-1])
 
         return accepted
+
+    def _try_scan_context_relocalization(
+        self,
+        scan_p: LaserScan,
+        current_desc: np.ndarray,
+        original_score: float,
+        mr: "MatchResult",
+    ) -> bool:
+        """Attempt scan-context based relocalization.
+
+        Searches the descriptor history for close matches, builds a
+        candidate pose from the stored pose + heading offset from the
+        best descriptor shift, then refines with ICP.
+
+        If any refined candidate beats the original matcher score,
+        ``mr`` is mutated in-place and ``True`` is returned.
+        """
+        assert self._scan_context is not None
+        assert self._loop_refiner is not None
+
+        n_descs = len(self._descriptors)
+        current_node = n_descs  # next node id (not yet added)
+        min_sep = int(self.cfg.scan_context_min_separation_nodes)
+        top_k = int(self.cfg.scan_context_top_k)
+
+        # Compute distances to all stored descriptors (with min separation)
+        candidates: list[tuple[float, int, int]] = []  # (distance, shift, node_idx)
+        for idx in range(n_descs):
+            if abs(current_node - idx) < min_sep:
+                continue
+            dist, shift = self._scan_context.best_shift(current_desc, self._descriptors[idx])
+            candidates.append((dist, shift, idx))
+
+        if not candidates:
+            return False
+
+        # Sort by distance (ascending = best match first)
+        candidates.sort(key=lambda c: c[0])
+        candidates = candidates[:top_k]
+
+        best_score = original_score
+        best_pose = mr.pose_map
+        replaced = False
+
+        sector_width = 2.0 * np.pi / self._scan_context.cfg.n_sectors
+
+        for sc_dist, shift, match_node in candidates:
+            # Build candidate pose from the matched node's pose
+            match_pose = self.graph.poses[match_node]
+            # The shift gives approximate heading offset
+            heading_offset = float(shift) * sector_width
+            candidate = Pose2(match_pose.x, match_pose.y, match_pose.theta + heading_offset)
+
+            # Get reference points from the matched node
+            ref_pts = self._ref_points_by_node[match_node]
+            if ref_pts.size == 0:
+                continue
+
+            # Refine with ICP
+            icp_result = self._loop_refiner.match(
+                scan=scan_p,
+                prediction_map=candidate,
+                ref_points_xy_map=ref_pts,
+            )
+
+            if icp_result.score > best_score:
+                best_score = icp_result.score
+                best_pose = icp_result.pose_map
+                replaced = True
+
+        if replaced:
+            mr.pose_map = best_pose
+            mr.score = best_score
+            mr.diagnostics["scan_context_relocalization"] = True
+            if self.telemetry:
+                self.telemetry.emit(
+                    "scan_context_relocalization",
+                    {
+                        "node": current_node,
+                        "original_score": original_score,
+                        "new_score": best_score,
+                        "new_pose": {"x": best_pose.x, "y": best_pose.y, "theta": best_pose.theta},
+                        "candidates_tried": len(candidates),
+                    },
+                )
+
+        return replaced
 
     def _predict_pose(self) -> Pose2:
         assert self._last_pose is not None

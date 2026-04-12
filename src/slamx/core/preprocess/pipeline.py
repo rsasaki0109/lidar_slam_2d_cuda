@@ -18,6 +18,9 @@ class PreprocessConfig:
     gradient_mask_max_range: float | None = None
     gradient_mask_window: int = 0
     gradient_mask_ratio: float | None = None  # mask if max/min range ratio exceeds this
+    pitch_compensation_enabled: bool = False
+    pitch_sensor_height_m: float = 0.5
+    pitch_floor_margin: float = 1.5  # multiply floor range estimate by this
 
 
 def _apply_gradient_mask(ranges: np.ndarray, cfg: PreprocessConfig) -> np.ndarray:
@@ -65,7 +68,51 @@ def _apply_gradient_mask(ranges: np.ndarray, cfg: PreprocessConfig) -> np.ndarra
     return out
 
 
-def preprocess_scan(scan: LaserScan, cfg: PreprocessConfig) -> LaserScan:
+def apply_pitch_compensation(
+    scan: LaserScan,
+    cfg: PreprocessConfig,
+    pitch_rad: float,
+) -> LaserScan:
+    """Remove rays that are estimated to hit the floor/ceiling based on pitch.
+
+    For each ray, we compute the minimum range at which the floor would be
+    hit given the current pitch angle and the sensor height.  Rays shorter
+    than ``floor_range * pitch_floor_margin`` are set to NaN.
+    """
+    from slamx.core.preprocess.imu_utils import pitch_adjusted_min_range
+
+    if abs(pitch_rad) < 1e-6:
+        return scan
+
+    floor_range = pitch_adjusted_min_range(
+        pitch_rad, cfg.pitch_sensor_height_m, bearing_rad=0.0
+    )
+    threshold = floor_range * cfg.pitch_floor_margin
+    r = scan.ranges.copy()
+    mask = np.isfinite(r) & (r < threshold)
+    r[mask] = np.nan
+    return LaserScan(
+        stamp_ns=scan.stamp_ns,
+        frame_id=scan.frame_id,
+        angle_min=scan.angle_min,
+        angle_max=scan.angle_max,
+        angle_increment=scan.angle_increment,
+        ranges=r,
+        range_min=scan.range_min,
+        range_max=scan.range_max,
+    )
+
+
+def preprocess_scan(
+    scan: LaserScan,
+    cfg: PreprocessConfig,
+    *,
+    pitch_rad: float | None = None,
+) -> LaserScan:
+    # Apply pitch compensation first if enabled and pitch is provided
+    if cfg.pitch_compensation_enabled and pitch_rad is not None and abs(pitch_rad) > 1e-6:
+        scan = apply_pitch_compensation(scan, cfg, pitch_rad)
+
     r = scan.ranges.copy()
     if cfg.min_range is not None:
         r = np.where(np.isfinite(r) & (r < cfg.min_range), np.nan, r)
