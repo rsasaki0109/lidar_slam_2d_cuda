@@ -42,6 +42,10 @@ def _engine_from_config(cfg: dict[str, Any], telemetry: JsonlTelemetry | None) -
     matcher_type = str(lm.get("type", "correlative"))
     matcher = lm.get("correlative_grid", {}) or {}
     icp = lm.get("icp", {}) or {}
+    hybrid_refinement = lm.get("hybrid_refinement", {}) or {}
+    hybrid_fallback = lm.get("hybrid_fallback", {}) or {}
+    hybrid_fallback_grid = hybrid_fallback.get("correlative_grid", {}) or {}
+    pred = slam.get("prediction", {}) or {}
     submap = slam.get("submap", {})
     opt_every = int(slam.get("optimize_every_n_keyframes", 10))
     loop = slam.get("loop_detection", {}) or {}
@@ -55,14 +59,21 @@ def _engine_from_config(cfg: dict[str, Any], telemetry: JsonlTelemetry | None) -
 
     from slamx.core.preprocess.pipeline import PreprocessConfig
     from slamx.core.local_matching.correlative import CorrelativeGridConfig
+    from slamx.core.local_matching.hybrid import HybridFallbackConfig, HybridRefinementConfig
     from slamx.core.local_matching.icp import IcpConfig
     from slamx.core.submap.builder import SubmapBuilderConfig
     from slamx.core.loop_detection.heuristic import HeuristicLoopConfig
 
     engine_cfg = LocalSlamConfig(
         preprocess=PreprocessConfig(
+            min_range=preprocess.get("min_range"),
             max_range=preprocess.get("max_range"),
             stride=int(preprocess.get("stride", 1)),
+            min_angle_deg=preprocess.get("min_angle_deg"),
+            max_angle_deg=preprocess.get("max_angle_deg"),
+            gradient_mask_diff_m=preprocess.get("gradient_mask_diff_m"),
+            gradient_mask_max_range=preprocess.get("gradient_mask_max_range"),
+            gradient_mask_window=int(preprocess.get("gradient_mask_window", 0)),
         ),
         matcher_type=matcher_type,
         correlative=CorrelativeGridConfig(
@@ -78,6 +89,25 @@ def _engine_from_config(cfg: dict[str, Any], telemetry: JsonlTelemetry | None) -
             min_correspondences=int(icp.get("min_correspondences", 30)),
             trim_fraction=float(icp.get("trim_fraction", 0.2)),
         ),
+        hybrid_refinement=HybridRefinementConfig(
+            top_k=int(hybrid_refinement.get("top_k", 1)),
+            min_linear_dist_m=float(hybrid_refinement.get("min_linear_dist_m", 0.0)),
+            min_angular_dist_deg=float(hybrid_refinement.get("min_angular_dist_deg", 0.0)),
+        ),
+        hybrid_fallback=HybridFallbackConfig(
+            enabled=bool(hybrid_fallback.get("enabled", False)),
+            trigger_score=float(hybrid_fallback.get("trigger_score", -0.01)),
+            min_score_gain=float(hybrid_fallback.get("min_score_gain", 0.0)),
+            correlative=CorrelativeGridConfig(
+                linear_step_m=float(hybrid_fallback_grid.get("linear_step_m", 0.05)),
+                angular_step_deg=float(hybrid_fallback_grid.get("angular_step_deg", 2.0)),
+                linear_window_m=float(hybrid_fallback_grid.get("linear_window_m", 0.20)),
+                angular_window_deg=float(hybrid_fallback_grid.get("angular_window_deg", 15.0)),
+                sigma_hit_m=float(hybrid_fallback_grid.get("sigma_hit_m", 0.10)),
+            ),
+        ),
+        prediction_mode=str(pred.get("mode", "hold")),
+        prediction_gain=float(pred.get("gain", 1.0)),
         submap=SubmapBuilderConfig(
             max_submap_scans=int(submap.get("max_submap_scans", 30)),
             downsample_stride=int(submap.get("downsample_stride", 2)),
@@ -156,6 +186,7 @@ def replay(
 
     telem = JsonlTelemetry(out / "telemetry.jsonl")
     eng = _engine_from_config(cfg, telem)
+    final_optimize_at_end = bool(cfg.get("slam", {}).get("final_optimize_at_end", False))
     ogm: OccupancyGridMap | None = None
     if write_map:
         mc = cfg.get("map", {}).get("occupancy_grid", {})
@@ -186,6 +217,10 @@ def replay(
             # map update uses the same preprocessed scan used by frontend
             # (Phase 1: reuse raw scan; acceptable for now)
             ogm.update(pose_map=pose, scan=scan)
+
+    if final_optimize_at_end and len(eng.graph.poses) > 1:
+        opt = eng.graph.optimize()
+        telem.emit("optimization", {"node": len(eng.graph.poses) - 1, **opt})
 
     save_trajectory_json(out / "trajectory.json", eng.graph.poses, eng.stamps_ns)
     if ogm is not None:
@@ -320,9 +355,13 @@ def sweep(
     seed: Annotated[int, typer.Option(help="Seed used for all runs (deterministic)")] = 0,
     gt: Annotated[
         Path | None,
-        typer.Option("--gt", help="Optional GT for ATE (csv/json: stamp_ns,x,y)"),
+        typer.Option("--gt", help="Optional GT for ATE (csv/json/tum)"),
     ] = None,
     max_dt_ms: Annotated[int, typer.Option(help="Max timestamp association gap (ms)")] = 50,
+    segment_gap_ms: Annotated[
+        int | None,
+        typer.Option(help="Optional time gap threshold used to split GT/traj into segments (ms)"),
+    ] = None,
     no_align: Annotated[bool, typer.Option(help="Disable SE2 alignment in ATE")] = False,
     write_reports: Annotated[
         bool, typer.Option("--write-reports", help="Write notes-style markdown per run under out_root/notes/")
@@ -354,6 +393,7 @@ def sweep(
         "seed": seed,
         "gt": str(gt) if gt else None,
         "max_dt_ms": int(max_dt_ms),
+        "segment_gap_ms": int(segment_gap_ms) if segment_gap_ms is not None else None,
         "align": bool(not no_align),
         "write_reports": bool(write_reports),
     }
@@ -385,6 +425,7 @@ def sweep(
             gt_path=gt,
             max_dt_ns=int(max_dt_ms) * 1_000_000,
             align=not no_align,
+            segment_gap_ns=(int(segment_gap_ms) * 1_000_000 if segment_gap_ms is not None else None),
         )
     if write_reports:
         notes_dir = out_root / "notes"
@@ -393,6 +434,7 @@ def sweep(
             gt_path=gt,
             max_dt_ns=int(max_dt_ms) * 1_000_000,
             align=not no_align,
+            segment_gap_ns=(int(segment_gap_ms) * 1_000_000 if segment_gap_ms is not None else None),
         )
         md = report_lib.render_markdown(rep)
         report_lib.write_notes_markdown(notes_dir / "baseline.md", md)
@@ -420,6 +462,7 @@ def sweep(
                 gt_path=gt,
                 max_dt_ns=int(max_dt_ms) * 1_000_000,
                 align=not no_align,
+                segment_gap_ns=(int(segment_gap_ms) * 1_000_000 if segment_gap_ms is not None else None),
             )
         if write_reports:
             notes_dir = out_root / "notes"
@@ -429,6 +472,7 @@ def sweep(
                     gt_path=gt,
                     max_dt_ns=int(max_dt_ms) * 1_000_000,
                     align=not no_align,
+                    segment_gap_ns=(int(segment_gap_ms) * 1_000_000 if segment_gap_ms is not None else None),
                 )
             )
             report_lib.write_notes_markdown(notes_dir / f"run_{rid}.md", md)
@@ -458,7 +502,7 @@ def sweep(
 @app.command("loop-tune")
 def loop_tune(
     input_path: Annotated[Path, typer.Argument(help="JSONL scans or .db3 bag")],
-    gt: Annotated[Path, typer.Option("--gt", help="GT CSV/JSON with stamp_ns,x,y")],
+    gt: Annotated[Path, typer.Option("--gt", help="GT CSV/JSON/TUM trajectory")],
     base_config: Annotated[
         Path | None,
         typer.Option("--base-config", "-c", help="Base YAML config"),
@@ -478,6 +522,10 @@ def loop_tune(
     ] = "-0.6,-0.4,-0.25",
     min_separation_nodes: Annotated[int, typer.Option(help="Min node separation")] = 30,
     max_dt_ms: Annotated[int, typer.Option(help="Max timestamp association gap (ms)")] = 50,
+    segment_gap_ms: Annotated[
+        int | None,
+        typer.Option(help="Optional time gap threshold used to split GT/traj into segments (ms)"),
+    ] = None,
     no_align: Annotated[bool, typer.Option(help="Disable SE2 alignment in ATE")] = False,
     write_reports: Annotated[bool, typer.Option(help="Write notes-style markdown per run")] = True,
     deterministic: Annotated[bool, typer.Option(help="Force deterministic mode")] = True,
@@ -518,6 +566,7 @@ def loop_tune(
             "input_path": str(input_path),
             "gt": str(gt),
             "axes": [{"key": a.key, "values": a.values} for a in axes],
+            "segment_gap_ms": int(segment_gap_ms) if segment_gap_ms is not None else None,
             "deterministic": deterministic,
             "seed": seed,
         },
@@ -542,7 +591,11 @@ def loop_tune(
         eng.handle_scan(scan)
     save_trajectory_json(baseline_dir / "trajectory.json", eng.graph.poses, eng.stamps_ns)
     baseline_ate = sweep_lib.compute_ate_for_run(
-        baseline_dir, gt_path=gt, max_dt_ns=int(max_dt_ms) * 1_000_000, align=not no_align
+        baseline_dir,
+        gt_path=gt,
+        max_dt_ns=int(max_dt_ms) * 1_000_000,
+        align=not no_align,
+        segment_gap_ns=(int(segment_gap_ms) * 1_000_000 if segment_gap_ms is not None else None),
     )
     if write_reports:
         notes_dir = out_root / "notes"
@@ -554,6 +607,7 @@ def loop_tune(
                     gt_path=gt,
                     max_dt_ns=int(max_dt_ms) * 1_000_000,
                     align=not no_align,
+                    segment_gap_ns=(int(segment_gap_ms) * 1_000_000 if segment_gap_ms is not None else None),
                 )
             ),
         )
@@ -575,7 +629,11 @@ def loop_tune(
 
         rep = sweep_lib.compare_to_baseline(baseline_dir, run_dir)
         rep["ate"] = sweep_lib.compute_ate_for_run(
-            run_dir, gt_path=gt, max_dt_ns=int(max_dt_ms) * 1_000_000, align=not no_align
+            run_dir,
+            gt_path=gt,
+            max_dt_ns=int(max_dt_ms) * 1_000_000,
+            align=not no_align,
+            segment_gap_ns=(int(segment_gap_ms) * 1_000_000 if segment_gap_ms is not None else None),
         )
         rep["tag"] = tag
         rep["run_id"] = rid
@@ -591,6 +649,7 @@ def loop_tune(
                         gt_path=gt,
                         max_dt_ns=int(max_dt_ms) * 1_000_000,
                         align=not no_align,
+                        segment_gap_ns=(int(segment_gap_ms) * 1_000_000 if segment_gap_ms is not None else None),
                     )
                 ),
             )
@@ -627,6 +686,10 @@ def export_tf_trajectory(
     parent: Annotated[str, typer.Option(help="Parent frame (e.g. map)")] = "map",
     child: Annotated[str, typer.Option(help="Child frame (e.g. base_link)")] = "base_link",
     tf_topic: Annotated[str, typer.Option(help="TF topic")] = "/tf",
+    tf_static_topic: Annotated[str, typer.Option(help="Static TF topic")] = "/tf_static",
+    static_from_bag: Annotated[
+        Path | None, typer.Option(help="Optional bag to source /tf_static from")
+    ] = None,
     out_csv: Annotated[Path, typer.Option("--out", "-o", help="Output CSV stamp_ns,x,y")] = Path(
         "runs/cartographer_traj.csv"
     ),
@@ -672,8 +735,38 @@ def export_tf_trajectory(
         if not tf_conns:
             avail = [t for t, _mt in list_topics_by_suffix(bag_path, msgtype_suffix="TFMessage")]
             raise typer.BadParameter(f"TF topic not found: {tf_topic}. Available: {avail}")
-        use = tf_conns[0]
+        static_bag_path = static_from_bag or bag_path
+        with AnyReader([static_bag_path]) as static_reader:
+            static_conns = [
+                c
+                for c in list(getattr(static_reader, "connections"))
+                if c.topic == tf_static_topic and str(c.msgtype).endswith("TFMessage")
+            ]
 
+            # Preload static transforms so parent->child chains that depend on /tf_static work
+            # from the first dynamic /tf message onward.
+            for use_static in static_conns:
+                for _conn, _ts, raw in static_reader.messages(connections=[use_static]):
+                    msg = static_reader.deserialize(raw, use_static.msgtype)
+                    for tr in getattr(msg, "transforms", []):
+                        hdr = getattr(tr, "header", None)
+                        parent_frame = str(getattr(hdr, "frame_id", "")).lstrip("/") if hdr else ""
+                        child_frame = str(getattr(tr, "child_frame_id", "")).lstrip("/")
+                        t = getattr(tr, "transform", None)
+                        if t is None:
+                            continue
+                        trans = getattr(t, "translation", None)
+                        rot = getattr(t, "rotation", None)
+                        if trans is None or rot is None:
+                            continue
+                        yaw = quat_to_yaw(float(rot.x), float(rot.y), float(rot.z), float(rot.w))
+                        buf.set_transform(
+                            parent_frame,
+                            child_frame,
+                            Pose2(float(trans.x), float(trans.y), float(yaw)),
+                        )
+
+        use = tf_conns[0]
         for _conn, _ts, raw in reader.messages(connections=[use]):
             msg = reader.deserialize(raw, use.msgtype)
             # tf2_msgs/TFMessage has .transforms list
@@ -852,18 +945,27 @@ def export_slamx_traj(
 
 @eval_app.command("ate")
 def eval_ate(
-    traj: Annotated[Path, typer.Argument(help="run_dir or estimated traj (.csv/.json/trajectory.json)")],
-    gt: Annotated[Path, typer.Option("--gt", help="Ground-truth CSV/JSON with stamp_ns,x,y")],
+    traj: Annotated[Path, typer.Argument(help="run_dir or estimated traj (.csv/.json/.tum/trajectory.json)")],
+    gt: Annotated[Path, typer.Option("--gt", help="Ground-truth CSV/JSON/TUM trajectory")],
     max_dt_ms: Annotated[int, typer.Option(help="Max timestamp association gap (ms)")] = 50,
+    segment_gap_ms: Annotated[
+        int | None,
+        typer.Option(help="Optional time gap threshold used to split GT/traj into segments (ms)"),
+    ] = None,
     no_align: Annotated[bool, typer.Option(help="Disable SE2 alignment (use raw)")] = False,
 ) -> None:
     """Compute ATE RMSE against ground truth (2D translation)."""
-    from slamx.core.evaluation.ate import associate_by_time, compute_ate_rmse, load_estimated_trajectory, load_gt
+    from slamx.core.evaluation.ate import build_ate_report, load_estimated_trajectory, load_gt
 
     est = load_estimated_trajectory(traj)
     gt_traj = load_gt(gt)
-    slam_xy, gt_xy = associate_by_time(est, gt_traj, max_dt_ns=int(max_dt_ms) * 1_000_000)
-    rep = compute_ate_rmse(slam_xy, gt_xy, align=not no_align)
+    rep = build_ate_report(
+        est,
+        gt_traj,
+        max_dt_ns=int(max_dt_ms) * 1_000_000,
+        align=not no_align,
+        segment_gap_ns=(int(segment_gap_ms) * 1_000_000 if segment_gap_ms is not None else None),
+    )
     rep["traj"] = str(traj)
     rep["gt"] = str(gt)
     typer.echo(json.dumps(rep, indent=2, ensure_ascii=False))
@@ -886,9 +988,13 @@ def doctor(
 def report(
     run_dir: Annotated[Path, typer.Argument(help="Run directory")],
     gt: Annotated[
-        Path | None, typer.Option("--gt", help="Optional GT for ATE (csv/json)")
+        Path | None, typer.Option("--gt", help="Optional GT for ATE (csv/json/tum)")
     ] = None,
     max_dt_ms: Annotated[int, typer.Option(help="Max timestamp association gap (ms)")] = 50,
+    segment_gap_ms: Annotated[
+        int | None,
+        typer.Option(help="Optional time gap threshold used to split GT/traj into segments (ms)"),
+    ] = None,
     no_align: Annotated[bool, typer.Option(help="Disable SE2 alignment (use raw)")] = False,
     notes_path: Annotated[
         Path, typer.Option("--out", help="Output markdown under notes/")
@@ -900,6 +1006,7 @@ def report(
         gt_path=gt,
         max_dt_ns=int(max_dt_ms) * 1_000_000,
         align=not no_align,
+        segment_gap_ns=(int(segment_gap_ms) * 1_000_000 if segment_gap_ms is not None else None),
     )
     md = report_lib.render_markdown(rep)
     report_lib.write_notes_markdown(notes_path, md)

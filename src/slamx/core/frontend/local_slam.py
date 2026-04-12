@@ -6,6 +6,11 @@ import numpy as np
 
 from slamx.core.backend.pose_graph import Edge, PoseGraph, PoseGraphConfig
 from slamx.core.local_matching.correlative import CorrelativeGridConfig, CorrelativeScanMatcher
+from slamx.core.local_matching.hybrid import (
+    HybridFallbackConfig,
+    HybridRefinementConfig,
+    HybridScanMatcher,
+)
 from slamx.core.local_matching.icp import IcpConfig, IcpScanMatcher
 from slamx.core.local_matching.protocol import ScanMatcher
 from slamx.core.loop_detection.heuristic import HeuristicLoopConfig, HeuristicLoopDetector
@@ -22,6 +27,10 @@ class LocalSlamConfig:
     matcher_type: str = "correlative"
     correlative: CorrelativeGridConfig = field(default_factory=CorrelativeGridConfig)
     icp: IcpConfig = field(default_factory=IcpConfig)
+    hybrid_refinement: HybridRefinementConfig = field(default_factory=HybridRefinementConfig)
+    hybrid_fallback: HybridFallbackConfig = field(default_factory=HybridFallbackConfig)
+    prediction_mode: str = "hold"
+    prediction_gain: float = 1.0
     submap: SubmapBuilderConfig = field(default_factory=SubmapBuilderConfig)
     optimize_every_n_keyframes: int = 10
     pose_graph: PoseGraphConfig = field(default_factory=PoseGraphConfig)
@@ -60,6 +69,7 @@ class LocalSlamEngine:
     _stamps: list[int | None] = field(default_factory=list)
     _scan_window: list[tuple[Pose2, LaserScan]] = field(default_factory=list)
     _last_pose: Pose2 | None = field(default=None, init=False)
+    _last_rel: Pose2 | None = field(default=None, init=False)
     _ref_points_by_node: list[np.ndarray] = field(default_factory=list, repr=False)
     _loop_matcher: ScanMatcher | None = field(default=None, repr=False)
     _loop_refiner: ScanMatcher | None = field(default=None, repr=False)
@@ -70,6 +80,13 @@ class LocalSlamEngine:
         mt = (self.cfg.matcher_type or "correlative").lower()
         if mt in {"correlative", "grid", "csm"}:
             self._matcher = CorrelativeScanMatcher(self.cfg.correlative)
+        elif mt in {"hybrid", "correlative_icp", "icp_refined"}:
+            self._matcher = HybridScanMatcher(
+                self.cfg.correlative,
+                self.cfg.icp,
+                refinement=self.cfg.hybrid_refinement,
+                fallback=self.cfg.hybrid_fallback,
+            )
         elif mt in {"icp"}:
             self._matcher = IcpScanMatcher(self.cfg.icp)
         else:
@@ -96,12 +113,13 @@ class LocalSlamEngine:
             node = self.graph.add_pose(init)
             self._stamps.append(scan.stamp_ns)
             self._last_pose = init
+            self._last_rel = None
             self._scan_window.append((init, scan_p))
             self._ref_points_by_node.append(np.zeros((0, 2), dtype=np.float64))
             self._emit_keyframe(node, init, scan_p, prediction=init, match_score=0.0, jump=0.0)
             return init
 
-        prediction = self._last_pose
+        prediction = self._predict_pose()
         ref = self._reference_points_map()
 
         mr = self._matcher.match(
@@ -130,6 +148,7 @@ class LocalSlamEngine:
 
         self._stamps.append(scan.stamp_ns)
         self._last_pose = accepted
+        self._last_rel = rel
         self._scan_window.append((accepted, scan_p))
         # store reference points for loop closure: local submap from recent scans
         stride = max(1, int(self.cfg.submap.downsample_stride))
@@ -223,8 +242,28 @@ class LocalSlamEngine:
                 if self.telemetry:
                     self.telemetry.emit("optimization", {"node": node, **opt})
                 self._last_pose = self.graph.poses[-1]
+                if len(self.graph.poses) >= 2:
+                    self._last_rel = self.graph.poses[-2].inverse().compose(self.graph.poses[-1])
 
         return accepted
+
+    def _predict_pose(self) -> Pose2:
+        assert self._last_pose is not None
+        mode = (self.cfg.prediction_mode or "hold").lower()
+        if mode in {"hold", "last_pose", "zero_velocity"} or self._last_rel is None:
+            return self._last_pose
+        if mode not in {"constant_velocity", "const_vel", "cv"}:
+            raise ValueError(f"Unknown prediction_mode: {self.cfg.prediction_mode}")
+        gain = float(self.cfg.prediction_gain)
+        if not np.isfinite(gain) or abs(gain) < 1e-12:
+            return self._last_pose
+        return self._last_pose.compose(
+            Pose2(
+                float(self._last_rel.x * gain),
+                float(self._last_rel.y * gain),
+                float(self._last_rel.theta * gain),
+            )
+        )
 
     def _reference_points_map(self) -> np.ndarray:
         if not self._scan_window:
