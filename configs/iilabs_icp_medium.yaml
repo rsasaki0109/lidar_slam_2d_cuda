@@ -1,0 +1,28 @@
+slam:
+  preprocess:
+    max_range: 10.0
+    stride: 4
+  local_matching:
+    type: icp
+    icp:
+      max_iterations: 10
+      max_correspondence_dist_m: 0.75
+      min_correspondences: 40
+      trim_fraction: 0.15
+  submap:
+    max_submap_scans: 20
+    downsample_stride: 2
+  optimize_every_n_keyframes: 35
+  loop_detection:
+    enabled: false
+  pose_graph:
+    max_iterations: 40
+    max_nfev_cap: 80000
+
+map:
+  occupancy_grid:
+    resolution_m: 0.05
+    size_x_m: 60.0
+    size_y_m: 60.0
+    origin_x_m: -30.0
+    origin_y_m: -30.0

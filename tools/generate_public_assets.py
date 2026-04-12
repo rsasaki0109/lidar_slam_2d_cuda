@@ -56,7 +56,7 @@ BENCHMARK_CARDS = [
         reference_label="Cartographer sampled",
         reference_path=ROOT / "runs" / "iilabs_loop_carto_at_slamx_s2k.csv",
         slamx_label="lidar_slam_2d best",
-        slamx_path=ROOT / "runs" / "iilabs_loop_s2k_refinegrid_top3_fallback_mid",
+        slamx_path=ROOT / "runs" / "iilabs_loop_s2k_top3_fallback_mid_shortloop_mid",
         gt_path=ROOT
         / "data"
         / "iilabs3d"
@@ -98,7 +98,7 @@ OVERLAY_PANELS = [
     ),
     OverlayPanel(
         label="IILABS loop 2k",
-        slamx_path=ROOT / "runs" / "iilabs_loop_s2k_refinegrid_top3_fallback_mid",
+        slamx_path=ROOT / "runs" / "iilabs_loop_s2k_top3_fallback_mid_shortloop_mid",
         reference_path=ROOT
         / "data"
         / "iilabs3d"

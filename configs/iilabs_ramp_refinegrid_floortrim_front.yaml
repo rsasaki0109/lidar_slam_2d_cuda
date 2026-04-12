@@ -1,0 +1,40 @@
+slam:
+  preprocess:
+    min_range: 1.5
+    max_range: 8.0
+    stride: 2
+    min_angle_deg: -100.0
+    max_angle_deg: 100.0
+  local_matching:
+    type: hybrid
+    correlative_grid:
+      linear_step_m: 0.025
+      angular_step_deg: 1.0
+      linear_window_m: 0.05
+      angular_window_deg: 8.0
+      sigma_hit_m: 0.08
+    icp:
+      max_iterations: 12
+      max_correspondence_dist_m: 0.75
+      min_correspondences: 50
+      trim_fraction: 0.10
+  prediction:
+    mode: constant_velocity
+    gain: 1.0
+  submap:
+    max_submap_scans: 35
+    downsample_stride: 1
+  optimize_every_n_keyframes: 25
+  loop_detection:
+    enabled: false
+  pose_graph:
+    max_iterations: 45
+    max_nfev_cap: 120000
+
+map:
+  occupancy_grid:
+    resolution_m: 0.05
+    size_x_m: 60.0
+    size_y_m: 60.0
+    origin_x_m: -30.0
+    origin_y_m: -30.0
