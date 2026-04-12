@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.spatial import cKDTree
 
+from slamx.core.local_matching.range_weights import compute_range_weights
 from slamx.core.types import LaserScan, MatchResult, Pose2, transform_points_xy
 
 
@@ -15,6 +16,8 @@ class CorrelativeGridConfig:
     linear_window_m: float = 0.5
     angular_window_deg: float = 30.0
     sigma_hit_m: float = 0.15  # Gaussian on ref points for scoring
+    range_weight_mode: str = "none"  # "none", "linear", "sigmoid"
+    range_weight_min_m: float = 1.0  # below this range, weight is reduced
 
 
 class CorrelativeScanMatcher:
@@ -57,6 +60,9 @@ class CorrelativeScanMatcher:
         sig = max(self.cfg.sigma_hit_m, 1e-6)
         inv_2sig2 = 1.0 / (2.0 * sig * sig)
 
+        scan_ranges = np.linalg.norm(pts_s, axis=1)
+        rw = compute_range_weights(scan_ranges, self.cfg.range_weight_mode, self.cfg.range_weight_min_m)
+
         lin = np.arange(
             -self.cfg.linear_window_m,
             self.cfg.linear_window_m + 1e-9,
@@ -92,7 +98,10 @@ class CorrelativeScanMatcher:
             pts_flat = pts_batch.reshape(-1, 2)  # (N_trans * N_pts, 2)
             nn_dist, _ = tree.query(pts_flat, k=1)
             nn_d2 = (nn_dist * nn_dist).reshape(n_trans, n_pts)
-            scores = np.mean(-nn_d2 * inv_2sig2, axis=1)  # (N_trans,)
+            if rw is not None:
+                scores = np.average(-nn_d2 * inv_2sig2, weights=rw, axis=1)  # (N_trans,)
+            else:
+                scores = np.mean(-nn_d2 * inv_2sig2, axis=1)  # (N_trans,)
             all_scores.append(scores)
             all_thetas.append(np.full(n_trans, theta))
 

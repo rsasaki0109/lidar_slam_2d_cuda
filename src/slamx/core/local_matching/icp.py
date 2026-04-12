@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.spatial import cKDTree
 
+from slamx.core.local_matching.range_weights import compute_range_weights
 from slamx.core.types import LaserScan, MatchResult, Pose2, transform_points_xy
 
 
@@ -14,19 +15,30 @@ class IcpConfig:
     max_correspondence_dist_m: float = 0.5
     min_correspondences: int = 30
     trim_fraction: float = 0.2  # drop worst residuals
+    range_weight_mode: str = "none"  # "none", "linear", "sigmoid"
+    range_weight_min_m: float = 1.0  # below this range, weight is reduced
 
 
 def _wrap_pi(a: float) -> float:
     return float(np.arctan2(np.sin(a), np.cos(a)))
 
 
-def _best_fit_se2(src: np.ndarray, dst: np.ndarray) -> Pose2:
-    """Compute SE2 (x,y,theta) that maps src -> dst in least squares."""
-    mu_s = np.mean(src, axis=0)
-    mu_d = np.mean(dst, axis=0)
-    X = src - mu_s
-    Y = dst - mu_d
-    H = X.T @ Y
+def _best_fit_se2(src: np.ndarray, dst: np.ndarray, weights: np.ndarray | None = None) -> Pose2:
+    """Compute SE2 (x,y,theta) that maps src -> dst in (weighted) least squares."""
+    if weights is not None:
+        w = weights[:, None]  # (N, 1)
+        w_sum = float(np.sum(weights))
+        mu_s = np.sum(w * src, axis=0) / w_sum
+        mu_d = np.sum(w * dst, axis=0) / w_sum
+        X = src - mu_s
+        Y = dst - mu_d
+        H = (w * X).T @ Y
+    else:
+        mu_s = np.mean(src, axis=0)
+        mu_d = np.mean(dst, axis=0)
+        X = src - mu_s
+        Y = dst - mu_d
+        H = X.T @ Y
     U, _S, Vt = np.linalg.svd(H)
     R = Vt.T @ U.T
     if np.linalg.det(R) < 0:
@@ -72,6 +84,9 @@ class IcpScanMatcher:
         ref = np.asarray(ref_points_xy_map, dtype=np.float64).reshape(-1, 2)
         tree = cKDTree(ref)
 
+        scan_ranges = np.linalg.norm(pts_s, axis=1)
+        all_weights = compute_range_weights(scan_ranges, self.cfg.range_weight_mode, self.cfg.range_weight_min_m)
+
         cur = prediction_map
         best_score = float("-inf")
         best_pose = cur
@@ -88,6 +103,7 @@ class IcpScanMatcher:
 
             src = pts_m[m]
             dst = ref[idx[m]]
+            w = all_weights[m] if all_weights is not None else None
 
             # trimmed ICP
             if self.cfg.trim_fraction > 0.0:
@@ -96,8 +112,9 @@ class IcpScanMatcher:
                 sel = order[:keep]
                 src = src[sel]
                 dst = dst[sel]
+                w = w[sel] if w is not None else None
 
-            delta = _best_fit_se2(src, dst)
+            delta = _best_fit_se2(src, dst, weights=w)
             cur = cur.compose(delta)
 
             err = dst - transform_points_xy(delta.as_se2(), src)  # approx

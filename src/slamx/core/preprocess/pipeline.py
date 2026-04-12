@@ -17,15 +17,29 @@ class PreprocessConfig:
     gradient_mask_diff_m: float | None = None
     gradient_mask_max_range: float | None = None
     gradient_mask_window: int = 0
+    gradient_mask_ratio: float | None = None  # mask if max/min range ratio exceeds this
 
 
 def _apply_gradient_mask(ranges: np.ndarray, cfg: PreprocessConfig) -> np.ndarray:
-    threshold = cfg.gradient_mask_diff_m
-    if threshold is None or not np.isfinite(threshold) or threshold <= 0.0 or ranges.size < 2:
+    has_diff = cfg.gradient_mask_diff_m is not None and np.isfinite(cfg.gradient_mask_diff_m) and cfg.gradient_mask_diff_m > 0.0
+    has_ratio = cfg.gradient_mask_ratio is not None and np.isfinite(cfg.gradient_mask_ratio) and cfg.gradient_mask_ratio > 1.0
+    if (not has_diff and not has_ratio) or ranges.size < 2:
         return ranges
 
     valid_pairs = np.isfinite(ranges[:-1]) & np.isfinite(ranges[1:])
-    jump_idx = np.flatnonzero(valid_pairs & (np.abs(ranges[1:] - ranges[:-1]) >= float(threshold)))
+    diff = np.abs(ranges[1:] - ranges[:-1])
+
+    # Build jump mask from absolute diff and/or ratio
+    jump_mask = np.zeros(ranges.size - 1, dtype=bool)
+    if has_diff:
+        jump_mask |= valid_pairs & (diff >= float(cfg.gradient_mask_diff_m))
+    if has_ratio:
+        pair_min = np.minimum(ranges[:-1], ranges[1:])
+        pair_max = np.maximum(ranges[:-1], ranges[1:])
+        safe_min = np.where(pair_min > 1e-6, pair_min, 1e-6)
+        jump_mask |= valid_pairs & ((pair_max / safe_min) >= float(cfg.gradient_mask_ratio))
+
+    jump_idx = np.flatnonzero(jump_mask)
     if jump_idx.size == 0:
         return ranges
 

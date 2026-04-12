@@ -74,6 +74,48 @@ def test_preprocess_masks_only_near_side_of_steep_local_gradient() -> None:
     )
 
 
+def test_preprocess_gradient_mask_ratio_detects_range_jump() -> None:
+    scan = LaserScan(
+        stamp_ns=1,
+        frame_id="laser",
+        angle_min=np.deg2rad(-30.0),
+        angle_max=np.deg2rad(30.0),
+        angle_increment=np.deg2rad(15.0),
+        ranges=np.array([4.0, 1.2, 4.0, 4.0, 4.0]),
+        range_min=0.1,
+        range_max=10.0,
+    )
+    # ratio 4.0/1.2 = 3.33, threshold 3.0 → should mask the near point (1.2)
+    out = preprocess_scan(
+        scan,
+        PreprocessConfig(gradient_mask_ratio=3.0, gradient_mask_max_range=2.0),
+    )
+    np.testing.assert_allclose(
+        out.ranges,
+        np.array([4.0, np.nan, 4.0, 4.0, 4.0]),
+        equal_nan=True,
+    )
+
+
+def test_preprocess_gradient_mask_ratio_below_threshold_keeps_all() -> None:
+    scan = LaserScan(
+        stamp_ns=1,
+        frame_id="laser",
+        angle_min=np.deg2rad(-30.0),
+        angle_max=np.deg2rad(30.0),
+        angle_increment=np.deg2rad(15.0),
+        ranges=np.array([4.0, 2.5, 4.0, 4.0, 4.0]),
+        range_min=0.1,
+        range_max=10.0,
+    )
+    # ratio 4.0/2.5 = 1.6, threshold 3.0 → no mask
+    out = preprocess_scan(
+        scan,
+        PreprocessConfig(gradient_mask_ratio=3.0, gradient_mask_max_range=3.0),
+    )
+    np.testing.assert_allclose(out.ranges, scan.ranges)
+
+
 def test_preprocess_gradient_mask_expands_to_neighbor_window() -> None:
     scan = LaserScan(
         stamp_ns=1,

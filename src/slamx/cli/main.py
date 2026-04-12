@@ -74,6 +74,7 @@ def _engine_from_config(cfg: dict[str, Any], telemetry: JsonlTelemetry | None) -
             gradient_mask_diff_m=preprocess.get("gradient_mask_diff_m"),
             gradient_mask_max_range=preprocess.get("gradient_mask_max_range"),
             gradient_mask_window=int(preprocess.get("gradient_mask_window", 0)),
+            gradient_mask_ratio=preprocess.get("gradient_mask_ratio"),
         ),
         matcher_type=matcher_type,
         correlative=CorrelativeGridConfig(
@@ -82,12 +83,16 @@ def _engine_from_config(cfg: dict[str, Any], telemetry: JsonlTelemetry | None) -
             linear_window_m=float(matcher.get("linear_window_m", 0.5)),
             angular_window_deg=float(matcher.get("angular_window_deg", 30.0)),
             sigma_hit_m=float(matcher.get("sigma_hit_m", 0.15)),
+            range_weight_mode=str(matcher.get("range_weight_mode", "none")),
+            range_weight_min_m=float(matcher.get("range_weight_min_m", 1.0)),
         ),
         icp=IcpConfig(
             max_iterations=int(icp.get("max_iterations", 20)),
             max_correspondence_dist_m=float(icp.get("max_correspondence_dist_m", 0.5)),
             min_correspondences=int(icp.get("min_correspondences", 30)),
             trim_fraction=float(icp.get("trim_fraction", 0.2)),
+            range_weight_mode=str(icp.get("range_weight_mode", "none")),
+            range_weight_min_m=float(icp.get("range_weight_min_m", 1.0)),
         ),
         hybrid_refinement=HybridRefinementConfig(
             top_k=int(hybrid_refinement.get("top_k", 1)),
