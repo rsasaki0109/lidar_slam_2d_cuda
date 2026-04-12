@@ -9,8 +9,7 @@ import yaml
 
 from slamx.cli import doctor_lib
 from slamx.core.evaluation.ate import (
-    associate_by_time,
-    compute_ate_rmse,
+    build_ate_report,
     load_gt,
     load_slam_trajectory,
 )
@@ -22,6 +21,7 @@ def build_report(
     gt_path: Path | None,
     max_dt_ns: int,
     align: bool,
+    segment_gap_ns: int | None = None,
 ) -> dict[str, Any]:
     out: dict[str, Any] = {"run_dir": str(run_dir)}
 
@@ -50,10 +50,14 @@ def build_report(
     if gt_path is not None and traj_path.exists():
         slam = load_slam_trajectory(traj_path)
         gt = load_gt(gt_path)
-        slam_xy, gt_xy = associate_by_time(slam, gt, max_dt_ns=max_dt_ns)
-        out["ate"] = compute_ate_rmse(slam_xy, gt_xy, align=align)
+        out["ate"] = build_ate_report(
+            slam,
+            gt,
+            max_dt_ns=max_dt_ns,
+            align=align,
+            segment_gap_ns=segment_gap_ns,
+        )
         out["ate"]["gt_path"] = str(gt_path)
-        out["ate"]["max_dt_ns"] = int(max_dt_ns)
     else:
         out["ate"] = None
 
@@ -72,6 +76,14 @@ def render_markdown(rep: dict[str, Any]) -> str:
     conc_lines: list[str] = []
     if ate and ate.get("ok"):
         conc_lines.append(f"- ATE RMSE: **{ate.get('rmse_m'):.3f} m** (n={ate.get('n')})")
+        assoc = ate.get("association") or {}
+        matched_pairs = assoc.get("matched_pairs")
+        traj_points = assoc.get("traj_points")
+        span_ratio = assoc.get("matched_traj_span_ratio")
+        if matched_pairs is not None and traj_points:
+            conc_lines.append(f"- ATE coverage: **{matched_pairs}/{traj_points}** trajectory points")
+        if isinstance(span_ratio, (float, int)) and span_ratio < 0.999:
+            conc_lines.append(f"- ATE time coverage: **{span_ratio * 100.0:.1f}%** of trajectory span")
     else:
         conc_lines.append("- ATE: **未計測**（GT未指定 or マッチ失敗）")
     if findings:
@@ -89,11 +101,15 @@ def render_markdown(rep: dict[str, Any]) -> str:
 
     if ate:
         facts.append(f"- ate: `{json.dumps(ate, ensure_ascii=False)}`")
+        for warning in ate.get("warnings") or []:
+            facts.append(f"- ate_warning: `{warning}`")
 
     # 未確認/要確認項目
     unknown: list[str] = []
     if not ate or not (ate.get("ok") if isinstance(ate, dict) else False):
         unknown.append("- GTが正しい座標系/時刻同期か（ATE算出条件）")
+    elif any("coverage" in w.lower() or "segments" in w.lower() for w in (ate.get("warnings") or [])):
+        unknown.append("- GT の欠測区間や区間分断で、評価が軌跡全体を代表しているか")
     if any(f.get("level") == "error" for f in findings):
         unknown.append("- run成果物の欠落が意図通りか（telemetry/trajectory）")
 
@@ -129,4 +145,3 @@ def render_markdown(rep: dict[str, Any]) -> str:
 def write_notes_markdown(notes_path: Path, content: str) -> None:
     notes_path.parent.mkdir(parents=True, exist_ok=True)
     notes_path.write_text(content, encoding="utf-8")
-

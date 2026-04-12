@@ -11,7 +11,7 @@ import yaml
 
 from slamx.cli import doctor_lib
 from slamx.config import deep_merge
-from slamx.core.evaluation.ate import associate_by_time, compute_ate_rmse, load_gt, load_slam_trajectory
+from slamx.core.evaluation.ate import build_ate_report, load_gt, load_slam_trajectory
 
 
 @dataclass(frozen=True)
@@ -95,18 +95,22 @@ def compute_ate_for_run(
     gt_path: Path,
     max_dt_ns: int,
     align: bool,
+    segment_gap_ns: int | None = None,
 ) -> dict[str, Any]:
     traj = run_dir / "trajectory.json"
     slam = load_slam_trajectory(traj)
     gt = load_gt(gt_path)
-    slam_xy, gt_xy = associate_by_time(slam, gt, max_dt_ns=int(max_dt_ns))
-    rep = compute_ate_rmse(slam_xy, gt_xy, align=align)
+    rep = build_ate_report(
+        slam,
+        gt,
+        max_dt_ns=int(max_dt_ns),
+        align=align,
+        segment_gap_ns=segment_gap_ns,
+    )
     rep["gt_path"] = str(gt_path)
-    rep["max_dt_ns"] = int(max_dt_ns)
     return rep
 
 
 def save_json(path: Path, obj: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(obj, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-
