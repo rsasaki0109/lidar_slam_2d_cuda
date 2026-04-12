@@ -59,8 +59,10 @@ def _engine_from_config(cfg: dict[str, Any], telemetry: JsonlTelemetry | None) -
     skip_opt_from = slam.get("pose_graph_skip_optimization_from_node")
     pitch_comp = slam.get("pitch_compensation", {}) or {}
     scan_context_cfg = slam.get("scan_context", {}) or {}
+    bb = lm.get("branch_bound", {}) or {}
 
     from slamx.core.preprocess.pipeline import PreprocessConfig
+    from slamx.core.local_matching.branch_bound import BranchBoundConfig
     from slamx.core.local_matching.correlative import CorrelativeGridConfig
     from slamx.core.local_matching.hybrid import HybridFallbackConfig, HybridRefinementConfig
     from slamx.core.local_matching.icp import IcpConfig
@@ -119,6 +121,15 @@ def _engine_from_config(cfg: dict[str, Any], telemetry: JsonlTelemetry | None) -
                 angular_window_deg=float(hybrid_fallback_grid.get("angular_window_deg", 15.0)),
                 sigma_hit_m=float(hybrid_fallback_grid.get("sigma_hit_m", 0.10)),
             ),
+        ),
+        branch_bound=BranchBoundConfig(
+            resolution_m=float(bb.get("resolution_m", 0.05)),
+            n_levels=int(bb.get("n_levels", 4)),
+            linear_window_m=float(bb.get("linear_window_m", 0.3)),
+            angular_window_deg=float(bb.get("angular_window_deg", 20.0)),
+            angular_step_deg=float(bb.get("angular_step_deg", 1.0)),
+            sigma_hit_m=float(bb.get("sigma_hit_m", 0.10)),
+            min_score=float(bb.get("min_score", -0.5)),
         ),
         prediction_mode=str(pred.get("mode", "hold")),
         prediction_gain=float(pred.get("gain", 1.0)),

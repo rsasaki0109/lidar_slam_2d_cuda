@@ -5,6 +5,11 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from slamx.core.backend.pose_graph import Edge, PoseGraph, PoseGraphConfig
+from slamx.core.local_matching.branch_bound import (
+    BranchBoundConfig,
+    BranchBoundScanMatcher,
+    HybridBBScanMatcher,
+)
 from slamx.core.local_matching.correlative import CorrelativeGridConfig, CorrelativeScanMatcher
 from slamx.core.local_matching.hybrid import (
     HybridFallbackConfig,
@@ -32,6 +37,7 @@ class LocalSlamConfig:
     icp: IcpConfig = field(default_factory=IcpConfig)
     hybrid_refinement: HybridRefinementConfig = field(default_factory=HybridRefinementConfig)
     hybrid_fallback: HybridFallbackConfig = field(default_factory=HybridFallbackConfig)
+    branch_bound: BranchBoundConfig = field(default_factory=BranchBoundConfig)
     prediction_mode: str = "hold"
     prediction_gain: float = 1.0
     submap: SubmapBuilderConfig = field(default_factory=SubmapBuilderConfig)
@@ -100,6 +106,14 @@ class LocalSlamEngine:
                 self.cfg.icp,
                 refinement=self.cfg.hybrid_refinement,
                 fallback=self.cfg.hybrid_fallback,
+            )
+        elif mt in {"branch_bound", "bb", "cartographer"}:
+            self._matcher = BranchBoundScanMatcher(self.cfg.branch_bound)
+        elif mt in {"hybrid_bb", "bb_icp"}:
+            self._matcher = HybridBBScanMatcher(
+                branch_bound=self.cfg.branch_bound,
+                icp=self.cfg.icp,
+                refinement=self.cfg.hybrid_refinement,
             )
         elif mt in {"icp"}:
             self._matcher = IcpScanMatcher(self.cfg.icp)
