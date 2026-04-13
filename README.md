@@ -8,8 +8,8 @@ Modern 2D LiDAR SLAM experiment platform with a ROS-free core and a CLI-first wo
 
 ## Why this repo is worth publishing now
 
-- **Backpack parity is already strong.** The current parity line takes the Cartographer backpack_2d comparison from `1.593 -> 0.081 m` on the 300-scan slice and from `7.693 -> 0.475 m` on the 2k-scan slice.
-- **Generalization is real.** The current front-end already beats the sampled Cartographer reference on multiple IILABS sequences, including `loop` and `slippage`.
+- **Backpack parity is already strong.** The current parity line takes the Cartographer backpack_2d pseudo-GT comparison from `1.593 -> 0.081 m` on the 300-scan slice and from `7.693 -> 0.475 m` on the 2k-scan slice.
+- **GT-backed IILABS wins already exist.** Against Cartographer trajectories sampled at the same slamx timestamps, the current front-end is already ahead on `slippage`, `nav_a_omni`, and `nav_a_diff`, with matched-prefix wins on segmented-GT `loop` and `elevator`.
 - **The workflow is inspectable.** Configs, notes, telemetry, and replay outputs are all tracked in a way that makes the iteration path understandable instead of hiding the tuning history.
 
 ## Quick start
@@ -35,7 +35,12 @@ The page is intentionally small and reuses the same SVG assets shown above.
 
 ## Current status
 
-The public-facing story is ready, but the research line is still active. The main open benchmark gap is the `ramp` sequence: a pitch-aware local-gradient mask helps a little on 1750-scan screening, but it does not yet close the full 2k gap.
+The public-facing story is ready, but the research line is still active. Backpack remains a Cartographer-parity benchmark against pseudo GT, while the GT-backed IILABS line already shows several wins over sampled Cartographer references. The main open work is long-run drift and loop-closure behavior on full-bag IILABS runs, not proving backpack "wins."
+
+## Benchmark scope
+
+- `notes/benchmark_cartographer_agreement_b0_2014-07-11.json` is the source of truth for `backpack_2d` parity against Cartographer pseudo GT.
+- `notes/benchmark_iilabs_vs_cartographer_sampled_vlp16.json` is the source of truth for GT-backed IILABS comparisons against timestamp-aligned sampled Cartographer trajectories.
 
 ## Benchmark reproduction configs
 

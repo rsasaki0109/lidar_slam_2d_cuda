@@ -6,7 +6,7 @@
     <title>lidar_slam_2d | CLI-first 2D LiDAR SLAM experiments</title>
     <meta
       name="description"
-      content="lidar_slam_2d is a CLI-first, ROS-free 2D LiDAR SLAM experiment platform with Cartographer parity work and IILABS benchmark notes."
+      content="lidar_slam_2d is a CLI-first, ROS-free 2D LiDAR SLAM experiment platform with Cartographer parity work, GT-backed IILABS comparisons, and tracked benchmark notes."
     />
     <link rel="stylesheet" href="assets/site.css" />
   </head>
@@ -17,8 +17,9 @@
         <h1>CLI-first 2D LiDAR SLAM experiments, published as a lightweight public benchmark log.</h1>
         <p class="lead">
           lidar_slam_2d is a ROS-free core for offline SLAM replay, evaluation, and scan-matcher iteration.
-          The current public slice focuses on Cartographer parity work, IILABS benchmark generalization,
-          and a small set of visuals that are easy to reuse in the repository README.
+          The current public slice focuses on a clean split between Cartographer parity work,
+          GT-backed IILABS comparisons, and a small set of visuals that are easy to reuse in the
+          repository README.
         </p>
         <div class="hero__chips">
           <span>Python 3.10+</span>
@@ -44,14 +45,16 @@
             <h3>Backpack parity</h3>
             <p>
               Early Cartographer backpack_2d segments moved from meter-scale drift to sub-meter
-              agreement by switching to Cartographer-style local matching and simpler pose graph handling.
+              agreement against Cartographer pseudo GT by switching to Cartographer-style local
+              matching and simpler pose graph handling.
             </p>
           </article>
           <article class="card">
-            <h3>IILABS generalization</h3>
+            <h3>IILABS GT-backed</h3>
             <p>
-              The current front-end already beats Cartographer sampled baselines on multiple IILABS
-              sequences. The remaining open case is <code>ramp</code>.
+              Continuous-GT wins already hold on <code>slippage</code>, <code>nav_a_omni</code>,
+              and <code>nav_a_diff</code>, with matched-prefix wins on segmented-GT
+              <code>loop</code> and <code>elevator</code>.
             </p>
           </article>
           <article class="card">
@@ -101,9 +104,9 @@ slamx eval ate runs/demo --gt runs/cartographer_traj_s300_window.csv</code></pre
           <h2>Current status</h2>
           <p>
             The public story is already strong enough to publish: backpack parity is substantially
-            improved and several IILABS sequences are ahead of the reference. The one open technical
-            thread is the <code>ramp</code> sequence, where pitch-robust preprocessing helps a little
-            but does not yet close the full 2k gap.
+            improved, and GT-backed IILABS slices are already ahead of sampled Cartographer on
+            several datasets. The active technical thread is now long-run drift and loop closure on
+            full-bag IILABS runs, not whether backpack parity should be described as a win.
           </p>
         </div>
       </section>

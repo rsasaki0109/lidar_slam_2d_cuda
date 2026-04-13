@@ -1,6 +1,6 @@
 # Cartographer ベンチ / slamx parity ライン 引き継ぎメモ
 
-更新日: 2026-04-08  
+更新日: 2026-04-14  
 対象ワークスペース: `lidar_slam_2d`
 
 ## 0. 先に結論
@@ -11,6 +11,7 @@
 - 今日の実務上の結論は、「最初の 300〜2000 scans は実質的に一方向の廊下で、ループ閉じ込みを積極的に効かせるより、Cartographer 寄せの local matching + 重くても素直な pose graph 最適化のほうが効いた」。
 - 特に **最初の 2k scans では loop closure を切ったランが最良**。`notes/benchmark_cartographer_agreement_b0_2014-07-11.json` への追記は **すでにステージ済み**。
 - ただし、このノート前半で言及している「loop closure 専用の ICP パラメータを `slam.loop_detection.icp` で分離可能にする」変更は、その後 parity 系の working YAML にも反映された。**locked benchmark config には入れていない**ので、再現用と実験用を混同しないこと。
+- 2026-04-14 時点で、GT-backed な IILABS 比較の public-facing 正本は `notes/benchmark_iilabs_vs_cartographer_sampled_vlp16.json` に分離した。このノートは **backpack parity の handoff を主目的** として読むこと。
 
 ## 1. このノートの役割
 
