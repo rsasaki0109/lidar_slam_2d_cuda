@@ -10,7 +10,7 @@
 - 300 scans でも、`runs/slamx_parity_medium_s300` は **0.0805190088 m** で、旧 `bench_fast` の **1.5926748606 m** から **約 20 倍改善**。
 - 今日の実務上の結論は、「最初の 300〜2000 scans は実質的に一方向の廊下で、ループ閉じ込みを積極的に効かせるより、Cartographer 寄せの local matching + 重くても素直な pose graph 最適化のほうが効いた」。
 - 特に **最初の 2k scans では loop closure を切ったランが最良**。`notes/benchmark_cartographer_agreement_b0_2014-07-11.json` への追記は **すでにステージ済み**。
-- ただし、ワークツリーには **未コミットのコード変更**も同時にステージされている。内容は「loop closure 専用の ICP パラメータを `slam.loop_detection.icp` で分離可能にする」もので、**まだ YAML 側では使っていない**。そのまままとめて commit するか、docs/bench 更新とコード変更を分離するかは、次担当が判断したほうがよい。
+- ただし、このノート前半で言及している「loop closure 専用の ICP パラメータを `slam.loop_detection.icp` で分離可能にする」変更は、その後 parity 系の working YAML にも反映された。**locked benchmark config には入れていない**ので、再現用と実験用を混同しないこと。
 
 ## 1. このノートの役割
 
@@ -202,7 +202,7 @@
 - `trim_fraction: 0.3`
 
 以前は `_loop_refiner = IcpScanMatcher(self.cfg.icp)` だったので、**loop refinement は local matcher 用 ICP 設定に引きずられていた**。  
-今回の差分でそれを切り離している。
+今回の差分でそれを切り離している。以後、working config の `configs/cartographer_parity_medium.yaml` / `configs/cartographer_parity_full.yaml` には `slam.loop_detection.icp` を明示している。
 
 ### 7.3 次担当への実務アドバイス
 
@@ -324,7 +324,7 @@ env -u PYTHONPATH .venv/bin/slamx eval ate runs/slamx_backpack2d_2k \
    - benchmark の正本再現用に使わない
    - 復活させるならコード側の機能と説明を揃えてから扱う
 4. **loop ICP 専用設定を本当に使うなら YAML まで落とす**
-   - `slam.loop_detection.icp` ブロックを parity 系 config に書く
+   - `slam.loop_detection.icp` ブロックは working parity config に追加済み
    - そのうえで 300 / 2k / full のどこに効くか再測定する
 5. **真の GT データへの移行計画を作る**
    - 今はあくまで Cartographer 擬似 GT 一致度

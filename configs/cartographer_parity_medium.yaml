@@ -31,6 +31,12 @@ slam:
       linear_window_m: 0.5
       angular_window_deg: 30.0
       sigma_hit_m: 0.25
+    # Keep loop refinement tighter than the generic local ICP defaults.
+    icp:
+      max_iterations: 15
+      max_correspondence_dist_m: 1.0
+      min_correspondences: 30
+      trim_fraction: 0.15
   pose_graph:
     max_iterations: 50
     max_nfev_cap: 200000

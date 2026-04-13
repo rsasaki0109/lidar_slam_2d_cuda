@@ -34,6 +34,22 @@ def test_locked_cartographer_parity_configs_capture_expected_benchmark_values() 
     assert loop_2k["accept_score"] == -2.0
 
 
+def test_working_cartographer_parity_configs_expose_loop_icp_overrides() -> None:
+    medium = _load_config("cartographer_parity_medium.yaml")
+    full = _load_config("cartographer_parity_full.yaml")
+
+    medium_loop_icp = medium["slam"]["loop_detection"]["icp"]
+    assert medium_loop_icp["max_iterations"] == 15
+    assert medium_loop_icp["max_correspondence_dist_m"] == 1.0
+    assert medium_loop_icp["min_correspondences"] == 30
+    assert medium_loop_icp["trim_fraction"] == 0.15
+
+    full_loop = full["slam"]["loop_detection"]
+    assert full_loop["icp_accept_rms"] == 0.10
+    assert full_loop["icp"]["max_iterations"] == 15
+    assert full_loop["icp"]["max_correspondence_dist_m"] == 1.0
+
+
 def test_cartographer_parity_full_config_drops_removed_optimization_window() -> None:
     cfg = _load_config("cartographer_parity_full.yaml")
     assert "optimization_window" not in cfg["slam"]["pose_graph"]
@@ -49,6 +65,9 @@ def test_cartographer_parity_configs_still_build_local_slam_engine() -> None:
         cfg = _load_config(name)
         engine = _engine_from_config(cfg, telemetry=None)
         assert engine.cfg.pose_graph.max_iterations > 0
+        if name in {"cartographer_parity_medium.yaml", "cartographer_parity_full.yaml"}:
+            assert engine.cfg.loop_icp.max_iterations == 15
+            assert engine.cfg.loop_icp.max_correspondence_dist_m == 1.0
 
 
 def test_cartographer_parity_configs_replay_fixture_smoke(tmp_path: Path) -> None:

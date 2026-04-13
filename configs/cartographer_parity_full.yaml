@@ -24,6 +24,12 @@ slam:
     min_separation_nodes: 45
     max_candidates: 4
     accept_score: -0.28
+    icp_accept_rms: 0.10
+    icp:
+      max_iterations: 15
+      max_correspondence_dist_m: 1.0
+      min_correspondences: 30
+      trim_fraction: 0.15
   pose_graph:
     max_iterations: 45
     max_nfev_cap: 72000
