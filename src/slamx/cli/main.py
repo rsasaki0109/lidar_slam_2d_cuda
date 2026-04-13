@@ -155,6 +155,7 @@ def _engine_from_config(cfg: dict[str, Any], telemetry: JsonlTelemetry | None) -
             accept_score=float(loop.get("accept_score", -0.25)),
             icp_accept_rms=float(loop.get("icp_accept_rms", 0.15)),
         ),
+        loop_detect_every_n=int(loop.get("detect_every_n", 1)),
         loop_icp=IcpConfig(
             max_iterations=int(loop_icp_cfg.get("max_iterations", 30)),
             max_correspondence_dist_m=float(loop_icp_cfg.get("max_correspondence_dist_m", 2.0)),

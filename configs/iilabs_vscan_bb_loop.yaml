@@ -1,0 +1,51 @@
+slam:
+  virtual_scan:
+    z_min: -0.1
+    z_max: 0.3
+    angular_resolution_deg: 0.5
+    max_range: 10.0
+  preprocess:
+    max_range: 10.0
+    stride: 1
+  local_matching:
+    type: hybrid_bb
+    branch_bound:
+      resolution_m: 0.05
+      n_levels: 4
+      linear_window_m: 0.3
+      angular_window_deg: 20.0
+      angular_step_deg: 1.0
+      sigma_hit_m: 0.10
+    icp:
+      max_iterations: 15
+      max_correspondence_dist_m: 0.75
+      min_correspondences: 50
+      trim_fraction: 0.10
+  prediction:
+    mode: constant_velocity
+    gain: 1.0
+  submap:
+    max_submap_scans: 35
+    downsample_stride: 1
+  optimize_every_n_keyframes: 25
+  loop_detection:
+    enabled: true
+    search_radius_m: 1.0
+    min_separation_nodes: 200
+    max_candidates: 3
+    accept_score: -2.0
+    icp_accept_rms: 0.05
+    correlative_grid:
+      linear_step_m: 0.05
+      angular_step_deg: 2.0
+      linear_window_m: 0.50
+      angular_window_deg: 30.0
+      sigma_hit_m: 0.15
+    icp:
+      max_iterations: 20
+      max_correspondence_dist_m: 1.0
+      min_correspondences: 30
+      trim_fraction: 0.15
+  pose_graph:
+    max_iterations: 50
+    max_nfev_cap: 200000

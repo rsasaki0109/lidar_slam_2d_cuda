@@ -49,6 +49,7 @@ class LocalSlamConfig:
     optimize_min_interval_for_long_runs: int = 200
     pose_graph_skip_optimization_from_node: int | None = None
     loop: HeuristicLoopConfig = field(default_factory=HeuristicLoopConfig)
+    loop_detect_every_n: int = 1  # run loop detection every N keyframes (1 = every scan)
     loop_ref_submap_scans: int = 10  # accumulate this many scans for loop closure reference
     loop_icp: IcpConfig = field(default_factory=lambda: IcpConfig(
         max_iterations=30,
@@ -249,7 +250,8 @@ class LocalSlamEngine:
         )
         self._emit_match_detail(node, mr, top_candidates=mr.candidates[:10])
 
-        if self._heuristic_loop is not None and self._loop_matcher is not None:
+        loop_interval = max(1, int(self.cfg.loop_detect_every_n))
+        if self._heuristic_loop is not None and self._loop_matcher is not None and node % loop_interval == 0:
             lrs = self._heuristic_loop.detect_and_match(
                 matcher=self._loop_matcher,
                 refiner=self._loop_refiner,
