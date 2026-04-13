@@ -1506,3 +1506,342 @@ env -u PYTHONPATH .venv/bin/slamx eval ate runs/iilabs_ramp_s2k_vscan_bb \
 nav_a_omni と ramp は full bag でも安定。elevator / nav_a_diff / loop の劣化は loop closure なしの長時間ドリフトが主因。
 
 次の改善候補: vscan+BB config に loop closure を重ねて full bag でのドリフトを抑制する。
+
+### 16.7 Full bag + loop closure 実験 (2026-04-14)
+
+full bag で劣化した3データセット (elevator, nav_a_diff, loop) に対し、loop closure を追加して再評価中。
+
+初回実行で判明した問題:
+- loop closure を毎スキャン実行すると、1スキャンあたり約12秒かかる
+- loop full (6204 scans) で推定20時間 → 非現実的
+- 原因: 毎スキャンで全ノード KDTree 検索 + correlative + ICP を max_candidates 分実行
+
+対策として `loop_detect_every_n` パラメータを追加:
+- `src/slamx/core/frontend/local_slam.py` に `loop_detect_every_n: int = 1` を追加
+- `detect_every_n: 5` で loop detection を5フレームごとに間引き
+- CPU 独占 + `max_candidates: 1` と合わせて **50倍高速化**
+
+config: `configs/iilabs_vscan_bb_loop_fast.yaml`
+- `detect_every_n: 5`
+- `max_candidates: 1`
+- `min_separation_nodes: 200`
+- `optimize_adaptive_from_node: 500` (長時間最適化を間引き)
+
+loop full bag を実行中。結果は追記予定。
+
+## 17. コードベース全体像 (2026-04-14 時点)
+
+### 17.1 アーキテクチャ
+
+```
+src/slamx/
+├── cli/
+│   ├── main.py              # CLI (replay, eval, sweep, diff, doctor, bench)
+│   ├── bench_lib.py          # ベンチマーク自動化
+│   ├── report_lib.py         # マークダウンレポート生成
+│   ├── sweep_lib.py          # パラメータスイープ
+│   └── doctor_lib.py         # 自動診断
+├── core/
+│   ├── types.py              # LaserScan, Pose2, MatchResult, Submap
+│   ├── frontend/
+│   │   └── local_slam.py     # LocalSlamEngine (メイン SLAM エンジン)
+│   ├── backend/
+│   │   └── pose_graph.py     # PoseGraph (anchor + sparse Jacobian)
+│   ├── local_matching/
+│   │   ├── protocol.py       # ScanMatcher プロトコル
+│   │   ├── correlative.py    # Correlative grid search (旧 default)
+│   │   ├── icp.py            # Point-to-point / point-to-line ICP
+│   │   ├── hybrid.py         # Correlative coarse + ICP refine
+│   │   ├── branch_bound.py   # ★ Multi-resolution B&B (Cartographer式)
+│   │   ├── scan_context.py   # Scan context descriptor
+│   │   └── range_weights.py  # Range-dependent weighting
+│   ├── preprocess/
+│   │   ├── pipeline.py       # PreprocessConfig + preprocess_scan()
+│   │   ├── virtual_scan.py   # ★ 3D PointCloud2 → 仮想 2D scan
+│   │   └── imu_utils.py      # IMU pitch 抽出 + floor ray 除去
+│   ├── evaluation/
+│   │   └── ate.py            # ATE 計算 (TUM/CSV/JSON, gap diagnostics)
+│   ├── io/
+│   │   └── bag.py            # ROS bag reader (LaserScan, PointCloud2, IMU)
+│   ├── loop_detection/
+│   │   └── heuristic.py      # Heuristic loop detector
+│   └── observability.py      # JSONL telemetry
+└── config.py                 # YAML config deep merge
+```
+
+### 17.2 Matcher 一覧と使い分け
+
+| matcher_type | クラス | 用途 | 速度 |
+|---|---|---|---|
+| `correlative` | CorrelativeScanMatcher | 旧 default。grid exhaustive search | 速い |
+| `icp` | IcpScanMatcher | point-to-point / point-to-line ICP | 速い |
+| `hybrid` | HybridScanMatcher | correlative coarse + ICP refine | 中速 |
+| `hybrid_bb` / `bb_icp` | HybridBBScanMatcher | ★ **B&B coarse + ICP refine** | やや重い |
+| `branch_bound` / `bb` | BranchBoundScanMatcher | B&B 単体 (ICP なし) | やや重い |
+
+**推奨**: `hybrid_bb` が全データセットで最良。
+
+### 17.3 入力モード
+
+| オプション | 入力 | 用途 |
+|---|---|---|
+| `--topic /eve/scan` | 2D LaserScan | 通常の 2D SLAM |
+| `--pointcloud-topic /eve/lidar3d` | 3D PointCloud2 | ★ 仮想 2D scan 生成 (pitch 不変) |
+| `--imu-topic /eve/imu/data` | IMU | pitch compensation (実験的) |
+
+### 17.4 テストスイート
+
+86 テスト、全パス。主要テストファイル:
+
+| ファイル | テスト数 | カバー対象 |
+|---|---|---|
+| test_branch_bound.py | 11 | B&B matcher + ProbabilityGrid |
+| test_virtual_scan.py | 7 | 3D→2D 変換 |
+| test_imu_preprocess.py | 10 | IMU pitch compensation |
+| test_icp_point_to_line.py | 6 | P2L ICP |
+| test_scan_context.py | 7 | Scan context descriptor |
+| test_range_weights.py | 10 | Range-weighted correspondence |
+| test_preprocess_pipeline.py | 7 | Preprocess pipeline |
+| test_pose_graph.py | (複数) | Anchor + sparse Jacobian |
+| test_hybrid_matcher_fallback.py | (複数) | Hybrid fallback |
+| test_replay_*.py | (複数) | E2E replay テスト |
+| test_eval_*.py | (複数) | ATE 評価 |
+
+### 17.5 Config 構成
+
+| config | 用途 | 状態 |
+|---|---|---|
+| `iilabs_ramp_vscan_bb.yaml` | ★ **統一 best config** (vscan + B&B + ICP) | 全6データセットで Carto 超え |
+| `iilabs_vscan_bb_loop_fast.yaml` | ★ vscan + B&B + loop closure (高速版) | full bag 評価中 |
+| `iilabs_ramp_virtual_scan.yaml` | vscan baseline (B&B なし) | 0.3567m |
+| `iilabs_ramp_bb_2d.yaml` | 2D + B&B (vscan なし) | 0.4571m |
+| `iilabs_hybrid_tail_refdense_cv_s2_refinegrid.yaml` | 2D 旧 best | 5/6 勝利 |
+| `configs/archived/` | 試してダメだった実験 config 21 個 | アーカイブ済み |
+
+### 17.6 データセット・パス
+
+固定パス:
+```
+data/iilabs3d/iilabs3d_dataset/benchmark/velodyne_vlp-16/
+├── elevator/
+│   ├── velodyne_elevator_2025-02-05-15-04-36.bag
+│   └── ground_truth.tum
+├── slippage/
+│   ├── velodyne_slippage_2025-02-05-10-39-46.bag
+│   └── ground_truth.tum
+├── nav_a_omni/
+│   ├── velodyne_nav_a_omni_2025-02-05-12-04-26.bag
+│   └── ground_truth.tum
+├── nav_a_diff/
+│   ├── velodyne_nav_a_diff_2025-02-05-11-28-45.bag
+│   └── ground_truth.tum
+├── loop/
+│   ├── velodyne_loop_2025-02-05-12-33-01.bag
+│   └── ground_truth.tum
+└── ramp/
+    ├── velodyne_ramp_2025-02-05-14-40-54.bag
+    └── ground_truth.tum
+```
+
+各 bag の PointCloud2 topic: `/eve/lidar3d`
+各 bag の LaserScan topic: `/eve/scan`
+各 bag の IMU topic: `/eve/imu/data`
+
+### 17.7 再現コマンド集
+
+```bash
+# === 全データセット 2k prefix (vscan + B&B) ===
+GT_BASE="data/iilabs3d/iilabs3d_dataset/benchmark/velodyne_vlp-16"
+
+for ds in elevator slippage nav_a_omni nav_a_diff loop ramp; do
+  BAG=$(ls ${GT_BASE}/${ds}/*.bag | head -1)
+  env -u PYTHONPATH .venv/bin/slamx replay "$BAG" \
+    --pointcloud-topic /eve/lidar3d \
+    --config configs/iilabs_ramp_vscan_bb.yaml \
+    --out runs/iilabs_${ds}_s2k_vscan_bb \
+    --max-scans 2000 --deterministic --seed 0 --no-write-map
+
+  env -u PYTHONPATH .venv/bin/slamx eval ate runs/iilabs_${ds}_s2k_vscan_bb \
+    --gt ${GT_BASE}/${ds}/ground_truth.tum --max-dt-ms 50
+done
+
+# === full bag + loop closure ===
+for ds in elevator nav_a_diff loop; do
+  BAG=$(ls ${GT_BASE}/${ds}/*.bag | head -1)
+  env -u PYTHONPATH .venv/bin/slamx replay "$BAG" \
+    --pointcloud-topic /eve/lidar3d \
+    --config configs/iilabs_vscan_bb_loop_fast.yaml \
+    --out runs/iilabs_${ds}_full_vscan_bb_loop_fast \
+    --deterministic --seed 0 --no-write-map
+
+  env -u PYTHONPATH .venv/bin/slamx eval ate runs/iilabs_${ds}_full_vscan_bb_loop_fast \
+    --gt ${GT_BASE}/${ds}/ground_truth.tum --max-dt-ms 50
+done
+```
+
+## 18. 次担当 (Codex) への引き継ぎ
+
+### 18.1 現在進行中
+
+- `runs/iilabs_loop_full_vscan_bb_loop_fast` — loop full bag + loop closure 実行中
+  - config: `configs/iilabs_vscan_bb_loop_fast.yaml`
+  - 比較先: loop full (loop closure なし) = 0.3910 m
+  - 2k prefix (loop closure なし) = 0.1013 m
+
+### 18.2 残タスク (優先度順)
+
+1. **loop full bag + loop closure の結果確認**
+   - 完了後に ATE 評価し、ドリフト抑制効果を確認
+   - 改善されたら nav_a_diff / elevator でも同じ config で実行
+
+2. **nav_a_diff full bag + loop closure**
+   - full (no loop) = 0.2395 m → loop closure で改善を期待
+
+3. **elevator full bag + loop closure**
+   - full (no loop) = 0.5994 m
+   - ただし GT は先頭 24.6 秒のみなので、full bag の改善が GT に反映されない可能性あり
+
+4. **Cartographer backpack2d ベンチマーク**
+   - 元々の比較対象。vscan + B&B を backpack2d でも試す
+   - bag: `data/cartographer_backpack2d/b0-2014-07-11-10-58-16.bag`
+   - topic: `horizontal_laser_2d` (2D LaserScan のみ、PointCloud2 なし)
+   - → B&B 単体 (`iilabs_ramp_bb_2d.yaml` ベース) で評価
+
+5. **パフォーマンス最適化**
+   - B&B の確率グリッド構築が毎スキャンで走る → キャッシュ化の余地
+   - loop closure の KDTree 検索 → バッチ化・間引きの余地
+   - プロファイル取得: `cProfile` or `py-spy`
+
+6. **コード品質**
+   - iilabs_loop_* / iilabs_hybrid_tail_* の古い実験 config をアーカイブ
+   - CI セットアップ (pytest + type check)
+   - README 更新
+
+### 18.3 信用してよいもの
+
+- `configs/iilabs_ramp_vscan_bb.yaml` — 全6データセット 2k prefix で Carto 超え確認済み
+- `configs/iilabs_vscan_bb_loop_fast.yaml` — loop closure 付き full bag 用 (検証中)
+- `runs/iilabs_*_s2k_vscan_bb/` — 2k prefix 結果 (全6データセット)
+- `runs/iilabs_*_full_vscan_bb/` — full bag 結果 (loop closure なし)
+- 86 テスト全パス (`env -u PYTHONPATH .venv/bin/pytest tests/ -q`)
+
+### 18.4 信用してはいけないもの
+
+- `configs/iilabs_hybrid_tail_*.yaml` — 旧 2D config 群。まだ動くが vscan+BB に劣る
+- `configs/iilabs_loop_*.yaml` — 旧 loop 実験。2D ベースなので vscan+BB には及ばない
+- `configs/archived/` — 試してダメだった実験。参考のみ
+- `configs/cartographer_parity_full.yaml` — 古い。`optimization_window` は現コードに無い
+
+### 18.5 YAML config の構造
+
+```yaml
+slam:
+  virtual_scan:          # PointCloud2 → 仮想 2D scan (--pointcloud-topic 使用時のみ)
+    z_min: -0.1
+    z_max: 0.3
+    angular_resolution_deg: 0.5
+    max_range: 10.0
+  preprocess:
+    min_range: null       # 最小距離フィルタ
+    max_range: 10.0       # 最大距離フィルタ
+    stride: 1             # ray 間引き
+    min_angle_deg: null    # FOV crop
+    max_angle_deg: null
+    gradient_mask_diff_m: null   # gradient mask (absolute diff)
+    gradient_mask_ratio: null    # gradient mask (ratio)
+    gradient_mask_max_range: null
+    gradient_mask_window: 0
+  pitch_compensation:     # IMU pitch compensation (--imu-topic 使用時)
+    enabled: false
+    sensor_height_m: 0.5
+    floor_margin: 1.5
+  local_matching:
+    type: hybrid_bb       # correlative / icp / hybrid / hybrid_bb / branch_bound
+    branch_bound:         # B&B 設定
+      resolution_m: 0.05
+      n_levels: 4
+      linear_window_m: 0.3
+      angular_window_deg: 20.0
+      angular_step_deg: 1.0
+      sigma_hit_m: 0.10
+    correlative_grid:     # correlative / hybrid 用
+      linear_step_m: 0.025
+      angular_step_deg: 1.0
+      linear_window_m: 0.05
+      angular_window_deg: 8.0
+      sigma_hit_m: 0.08
+      range_weight_mode: none    # none / linear / sigmoid
+      range_weight_min_m: 1.0
+    icp:                  # ICP 設定 (hybrid / hybrid_bb の refine ステージ)
+      max_iterations: 15
+      max_correspondence_dist_m: 0.75
+      min_correspondences: 50
+      trim_fraction: 0.10
+      icp_mode: point     # point / line
+      normal_k: 5         # line mode の法線推定用
+      range_weight_mode: none
+      range_weight_min_m: 1.0
+    hybrid_refinement:    # hybrid の multi-hypothesis
+      top_k: 1
+      min_linear_dist_m: 0.0
+      min_angular_dist_deg: 0.0
+    hybrid_fallback:      # hybrid の bad-score fallback
+      enabled: false
+      trigger_score: -0.01
+      min_score_gain: 0.0
+      correlative_grid: { ... }
+  prediction:
+    mode: constant_velocity    # hold / constant_velocity
+    gain: 1.0
+  submap:
+    max_submap_scans: 35
+    downsample_stride: 1
+  optimize_every_n_keyframes: 25
+  optimize_adaptive_from_node: null   # 長時間走行の最適化間引き
+  optimize_min_interval_for_long_runs: 200
+  scan_context:           # scan context relocalization
+    enabled: false
+    n_sectors: 60
+    max_range: 10.0
+    trigger_score: -0.03
+    top_k: 3
+    min_separation_nodes: 50
+  loop_detection:
+    enabled: false
+    detect_every_n: 1     # N フレームごとに loop 検出
+    search_radius_m: 1.0
+    min_separation_nodes: 200
+    max_candidates: 1
+    accept_score: -2.0
+    icp_accept_rms: 0.05
+    correlative_grid: { ... }
+    icp: { ... }
+  pose_graph:
+    max_iterations: 50
+    max_nfev_cap: 200000
+```
+
+### 18.6 重要な実装の注意点
+
+1. **PointCloud2 の scan rate は 2D LaserScan より低い**
+   - ramp: 2D=40000 scans, PointCloud2=1876 scans (同じ bag)
+   - loop: 2D=24987 scans, PointCloud2=6204 scans
+   - `--max-scans 2000` は PointCloud2 のフレーム数でカウントされる
+
+2. **GT の coverage に注意**
+   - elevator: GT は先頭 24.6 秒のみ (2 セグメント、gap あり)
+   - loop: GT は 6 セグメント (gap あり)
+   - slippage / nav_a_omni / nav_a_diff / ramp: GT は連続
+
+3. **B&B の計算コスト**
+   - 確率グリッド構築: 参照点数 × Gaussian filter → scipy gaussian_filter で高速
+   - 探索: angular_step_deg × (linear_window_m / resolution_m)^2 の候補を枝刈り
+   - 目安: 2k scans で約8分 (CPU 独占)
+
+4. **loop closure + long bag の計算コスト**
+   - `detect_every_n: 5` + `max_candidates: 1` で実用的な速度
+   - `detect_every_n: 1` + `max_candidates: 3` は非現実的 (数日)
+   - `optimize_adaptive_from_node` で長時間最適化を間引くこと
+
+5. **env -u PYTHONPATH**
+   - venv 内の slamx を使うため、常に `env -u PYTHONPATH` をつける
