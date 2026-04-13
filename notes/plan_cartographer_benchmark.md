@@ -166,10 +166,10 @@
 
 つまり、**現行 YAML は「議論中の最新設定」ではあっても、「実測ベストの完全再現設定」ではない**。
 
-次担当が再現性を重視するなら、まず以下のどちらかをやるべき。
+次担当が再現性を重視するなら、以下を正として扱う。
 
-1. `configs/cartographer_parity_medium_s300_locked.yaml` / `configs/cartographer_parity_noloop_s2k.yaml` のような固定設定ファイルを作る
-2. あるいは `runs/*/config_resolved.yaml` を実験記録として正とみなし、再実行時だけ一時的に YAML を差し替える
+1. `configs/cartographer_parity_medium_s300_locked.yaml` / `configs/cartographer_parity_noloop_s2k.yaml` を benchmark 再現用 fixed config とする
+2. あるいは `runs/*/config_resolved.yaml` を実験記録として参照し、必要なら fixed config の正しさを再確認する
 
 ## 7. ステージ済み未コミット差分の意味
 
@@ -267,8 +267,8 @@
 
 理由:
 
-- `configs/cartographer_parity_full.yaml` にはまだ `pose_graph.optimization_window` が残っている
-- しかし現在の `src/slamx/cli/main.py` はそれを読まない
+- `configs/cartographer_parity_full.yaml` は deprecated な exploratory config で、benchmark の正本再現用ではない
+- `pose_graph.optimization_window` は設定ファイルからも削除済みだが、古い handoff 説明には sliding-window 前提が残っている
 - `tests/test_pose_graph_window.py` も `700e1b3` で削除済み
 
 つまり、**parity_full は今のコードベースでは設計ノートの残骸に近い**。
@@ -309,7 +309,7 @@ env -u PYTHONPATH .venv/bin/slamx eval ate runs/slamx_backpack2d_2k \
 
 ### 11.4 再走時の注意
 
-もし 300 最良や 2k 最良を「再現」したいなら、現行 `configs/cartographer_parity_medium.yaml` をそのまま使わず、まず `runs/*/config_resolved.yaml` を見て固定設定を起こすこと。
+もし 300 最良や 2k 最良を「再現」したいなら、`configs/cartographer_parity_medium_s300_locked.yaml` または `configs/cartographer_parity_noloop_s2k.yaml` を使うこと。`configs/cartographer_parity_medium.yaml` は継続調整用として扱う。
 
 ## 12. 次担当の優先タスク
 
@@ -317,11 +317,12 @@ env -u PYTHONPATH .venv/bin/slamx eval ate runs/slamx_backpack2d_2k \
 
 1. **docs/bench と code を分けて commit するか判断**
    - docs only で先に確定させるのが安全
-2. **300 / 2k ベスト設定を固定 YAML 化**
-   - 再現性が無いままだと、次の rerun で混乱する
-3. **`configs/cartographer_parity_full.yaml` の扱いを決める**
-   - 復活させるならコードも戻す
-   - 使わないなら deprecated と明記するか削除する
+2. **300 / 2k ベスト設定の正本参照を維持**
+   - fixed YAML は `configs/cartographer_parity_medium_s300_locked.yaml` と `configs/cartographer_parity_noloop_s2k.yaml`
+   - benchmark JSON / docs / rerun 手順がこの 2 本を指しているか確認する
+3. **`configs/cartographer_parity_full.yaml` の deprecated 状態を維持**
+   - benchmark の正本再現用に使わない
+   - 復活させるならコード側の機能と説明を揃えてから扱う
 4. **loop ICP 専用設定を本当に使うなら YAML まで落とす**
    - `slam.loop_detection.icp` ブロックを parity 系 config に書く
    - そのうえで 300 / 2k / full のどこに効くか再測定する

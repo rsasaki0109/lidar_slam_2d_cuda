@@ -37,6 +37,15 @@ The page is intentionally small and reuses the same SVG assets shown above.
 
 The public-facing story is ready, but the research line is still active. The main open benchmark gap is the `ramp` sequence: a pitch-aware local-gradient mask helps a little on 1750-scan screening, but it does not yet close the full 2k gap.
 
+## Benchmark reproduction configs
+
+For the Cartographer `backpack_2d` parity numbers, the exact recorded best runs now have fixed configs:
+
+- `configs/cartographer_parity_medium_s300_locked.yaml` reproduces the best 300-scan run.
+- `configs/cartographer_parity_noloop_s2k.yaml` reproduces the best 2k-scan run.
+
+`configs/cartographer_parity_medium.yaml` remains the actively edited parity working config, and `configs/cartographer_parity_full.yaml` is retained only as a deprecated exploratory full-bag config.
+
 ## Refreshing the public assets
 
 ```bash

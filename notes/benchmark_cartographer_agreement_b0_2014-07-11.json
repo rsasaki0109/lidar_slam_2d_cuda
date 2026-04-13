@@ -17,7 +17,7 @@
   "runs_300_parity_medium": {
     "slamx_run": "runs/slamx_parity_medium_s300",
     "slamx_max_scans": 300,
-    "config": "configs/cartographer_parity_medium.yaml",
+    "config": "configs/cartographer_parity_medium_s300_locked.yaml",
     "gt_csv_windowed": "runs/cartographer_traj_s300_window.csv",
     "agreement_vs_cartographer_pseudo_gt": {
       "align_se2": { "ok": true, "n": 258, "rmse_m": 0.08051900876677438, "mean_m": 0.07302954991806501 },
@@ -38,7 +38,7 @@
   "runs_2000_parity_medium": {
     "slamx_run": "runs/slamx_parity_noloop_s2k",
     "slamx_max_scans": 2000,
-    "config": "configs/cartographer_parity_medium.yaml",
+    "config": "configs/cartographer_parity_noloop_s2k.yaml",
     "notes": "Correlative scan matching (Cartographer port params), cKDTree + batch optimization, vectorized pose graph. Loop detection disabled (no true revisits in first 2k scans).",
     "gt_csv_windowed": "runs/cartographer_traj_s2k_window.csv",
     "agreement_vs_cartographer_pseudo_gt": {

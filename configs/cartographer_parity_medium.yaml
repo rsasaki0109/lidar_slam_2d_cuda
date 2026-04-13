@@ -1,5 +1,7 @@
-# A: short/medium offline runs (≈300–2000 scans) — Cartographer-port local params, full pose graph,
-# heuristic loop closure. No BA skip / no adaptive thinning (those hurt parity-style agreement).
+# Maintained Cartographer-parity working config for short/medium offline runs (≈300–2000 scans).
+# This is not the exact reproduction of the best recorded 300-scan or 2k benchmark runs.
+# Use `cartographer_parity_medium_s300_locked.yaml` or `cartographer_parity_noloop_s2k.yaml`
+# when reproducibility of those measured results matters more than ongoing iteration.
 slam:
   preprocess:
     max_range: 30.0

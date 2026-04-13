@@ -1,7 +1,5 @@
-# Deprecated exploratory full-bag parity config.
-# The old sliding-window pose-graph path has been removed from the codebase, so the historical
-# `optimization_window` knob is intentionally gone here. Use `bench_backpack_full.yaml` for the
-# maintained full-bag path, or the locked parity configs for benchmark-faithful 300/2k reruns.
+# Reproduction config for the recorded best 300-scan Cartographer backpack_2d parity run.
+# Source of truth: runs/slamx_parity_medium_s300/config_resolved.yaml
 slam:
   preprocess:
     max_range: 30.0
@@ -17,7 +15,7 @@ slam:
   submap:
     max_submap_scans: 40
     downsample_stride: 2
-  optimize_every_n_keyframes: 45
+  optimize_every_n_keyframes: 90
   loop_detection:
     enabled: true
     search_radius_m: 2.5
@@ -25,8 +23,8 @@ slam:
     max_candidates: 4
     accept_score: -0.28
   pose_graph:
-    max_iterations: 45
-    max_nfev_cap: 72000
+    max_iterations: 50
+    max_nfev_cap: 200000
 
 map:
   occupancy_grid:
