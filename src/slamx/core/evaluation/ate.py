@@ -197,6 +197,49 @@ def associate_by_time(slam: Traj2D, gt: Traj2D, *, max_dt_ns: int = 50_000_000) 
     return assoc.slam_xy, assoc.gt_xy
 
 
+def sample_trajectory_to_timestamps(
+    source: Traj2D,
+    target_stamp_ns: list[int] | np.ndarray,
+    *,
+    max_dt_ns: int = 50_000_000,
+) -> Traj2D:
+    """Sample source XY positions onto target timestamps using nearest-neighbor association."""
+    if len(source.stamp_ns) == 0 or len(target_stamp_ns) == 0:
+        return Traj2D(stamp_ns=[], xy=_empty_xy())
+
+    src_t = np.asarray(source.stamp_ns, dtype=np.int64)
+    src_xy = source.xy
+    order = np.argsort(src_t)
+    src_t = src_t[order]
+    src_xy = src_xy[order]
+
+    sampled_stamp_ns: list[int] = []
+    sampled_xy: list[np.ndarray] = []
+    for raw_ts in np.asarray(target_stamp_ns, dtype=np.int64):
+        ts = int(raw_ts)
+        j = int(np.searchsorted(src_t, ts))
+        candidates = []
+        if 0 <= j < src_t.size:
+            candidates.append(j)
+        if 0 <= j - 1 < src_t.size:
+            candidates.append(j - 1)
+        if not candidates:
+            continue
+        best = min(candidates, key=lambda k: abs(int(src_t[k] - ts)))
+        dt = abs(int(src_t[best] - ts))
+        if dt <= int(max_dt_ns):
+            sampled_stamp_ns.append(ts)
+            sampled_xy.append(src_xy[best])
+
+    if not sampled_xy:
+        return Traj2D(stamp_ns=[], xy=_empty_xy())
+
+    return Traj2D(
+        stamp_ns=sampled_stamp_ns,
+        xy=np.asarray(sampled_xy, dtype=np.float64),
+    )
+
+
 def _auto_segment_gap_ns(stamps_sorted: np.ndarray, *, min_gap_ns: int = 0) -> int | None:
     if stamps_sorted.size < 2:
         return int(min_gap_ns) if min_gap_ns > 0 else None

@@ -1459,6 +1459,11 @@ prefix align 推移（`top3_fallback_mid`）:
 
 統一 config: `configs/iilabs_ramp_vscan_bb.yaml`
 
+注:
+
+- public-facing に厳密な「sampled Cartographer 比較」として使う正本は `notes/benchmark_iilabs_vs_cartographer_sampled_vlp16.json`
+- 2026-04-14 に `ramp` だけは `runs/iilabs_ramp_s2k_vscan_bb` の timestamps へ Cartographer 軌跡を再サンプルし直して確認済み
+
 | データセット | vscan+BB | 既存 2D best | Carto sampled | vs Carto |
 |---|---:|---:|---:|---|
 | elevator | **0.0148 m** | 0.0352 m | 0.1207 m | **8.2x better** |
@@ -1466,9 +1471,26 @@ prefix align 推移（`top3_fallback_mid`）:
 | nav_a_omni | **0.0601 m** | 0.0789 m | 0.1411 m | **2.3x better** |
 | nav_a_diff | **0.1187 m** | 0.1251 m | 0.1961 m | **1.7x better** |
 | loop | **0.1013 m** | 0.2470 m | 0.1853 m | **1.8x better** |
-| ramp | **0.1042 m** | 0.4530 m | 0.1042 m | **1.0x (tie)** |
+| ramp | **0.1042 m** | 0.4530 m | 0.1559 m | **1.5x better** |
 
 **全6データセットで Cartographer 同等以上を達成。**
+
+#### 2026-04-14 追補: `ramp` を vscan timestamps で再採点
+
+- sampled traj: `runs/iilabs_ramp_carto_at_slamx_s2k_vscan_bb.csv`
+- 生成コマンド:
+
+```bash
+env -u PYTHONPATH .venv/bin/slamx sample-trajectory-to-timestamps \
+  runs/iilabs_ramp_carto_traj.csv \
+  runs/iilabs_ramp_s2k_vscan_bb \
+  --out runs/iilabs_ramp_carto_at_slamx_s2k_vscan_bb.csv \
+  --max-dt-ms 50
+```
+
+- `slamx` `runs/iilabs_ramp_s2k_vscan_bb`: `align 0.1042358193 m`, `no-align 0.1606707753 m`, `n=1823`
+- Cartographer sampled on the same timestamps: `align 0.1558772985 m`, `no-align 0.2115049248 m`, `n=1823`
+- したがって `ramp` は、旧 2D run の timestamps に依存した tie ではなく、**vscan+BB run 自身の timestamps でも Cartographer sampled を上回った**
 
 ### 16.3 勝因分析
 

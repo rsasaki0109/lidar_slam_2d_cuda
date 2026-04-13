@@ -6,6 +6,7 @@ from slamx.core.evaluation.ate import (
     load_estimated_trajectory,
     load_gt,
     load_slam_trajectory,
+    sample_trajectory_to_timestamps,
     summarize_timestamp_series,
 )
 
@@ -15,6 +16,7 @@ __all__ = [
     "load_estimated_trajectory",
     "associate_by_time_detailed",
     "associate_by_time",
+    "sample_trajectory_to_timestamps",
     "summarize_timestamp_series",
     "build_ate_report",
     "compute_ate_rmse",

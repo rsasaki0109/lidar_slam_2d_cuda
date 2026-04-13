@@ -9,7 +9,7 @@ Modern 2D LiDAR SLAM experiment platform with a ROS-free core and a CLI-first wo
 ## Why this repo is worth publishing now
 
 - **Backpack parity is already strong.** The current parity line takes the Cartographer backpack_2d pseudo-GT comparison from `1.593 -> 0.081 m` on the 300-scan slice and from `7.693 -> 0.475 m` on the 2k-scan slice.
-- **GT-backed IILABS wins already exist.** Against Cartographer trajectories sampled at the same slamx timestamps, the current front-end is already ahead on `slippage`, `nav_a_omni`, and `nav_a_diff`, with matched-prefix wins on segmented-GT `loop` and `elevator`.
+- **GT-backed IILABS wins already exist.** Against Cartographer trajectories sampled at the same slamx timestamps, the current front-end is already ahead on `slippage`, `nav_a_omni`, `nav_a_diff`, and `ramp`, with matched-prefix wins on segmented-GT `loop` and `elevator`.
 - **The workflow is inspectable.** Configs, notes, telemetry, and replay outputs are all tracked in a way that makes the iteration path understandable instead of hiding the tuning history.
 
 ## Quick start

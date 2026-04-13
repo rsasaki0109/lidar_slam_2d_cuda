@@ -17,7 +17,7 @@ def test_iilabs_benchmark_note_tracks_timestamp_aligned_public_claims() -> None:
     assert rep["evaluation_protocol"]["max_dt_ms"] == 50
 
     comparisons = rep["comparisons"]
-    for name in ("slippage_full", "nav_a_omni_2k", "nav_a_diff_2k"):
+    for name in ("slippage_full", "nav_a_omni_2k", "nav_a_diff_2k", "ramp_2k_vscan_bb"):
         comp = comparisons[name]
         assert comp["gt_coverage"] == "continuous"
         assert comp["align_se2_rmse_m"]["slamx"] < comp["align_se2_rmse_m"]["sampled_cartographer"]
@@ -33,6 +33,3 @@ def test_iilabs_benchmark_note_tracks_timestamp_aligned_public_claims() -> None:
     assert elevator["align_se2_rmse_m"]["slamx"] < elevator["align_se2_rmse_m"]["sampled_cartographer"]
     assert elevator["matched_gt_segments"] == {"matched": 1, "total": 2}
     assert any("Only 954/2000" in warning for warning in elevator["warnings"])
-
-    ramp = rep["omitted_comparisons"]["ramp_2k_vscan_bb"]
-    assert "timestamp axis" in ramp["reason"]

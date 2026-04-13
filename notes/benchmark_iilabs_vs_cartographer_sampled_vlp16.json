@@ -15,7 +15,8 @@
     "continuous_gt_wins": [
       "slippage_full",
       "nav_a_omni_2k",
-      "nav_a_diff_2k"
+      "nav_a_diff_2k",
+      "ramp_2k_vscan_bb"
     ],
     "segmented_gt_prefix_wins": [
       "loop_2k_prefix",
@@ -71,6 +72,22 @@
         "total": 1
       }
     },
+    "ramp_2k_vscan_bb": {
+      "slice": "2k_prefix",
+      "gt_coverage": "continuous",
+      "slamx_run": "runs/iilabs_ramp_s2k_vscan_bb",
+      "sampled_cartographer_csv": "runs/iilabs_ramp_carto_at_slamx_s2k_vscan_bb.csv",
+      "gt": "data/iilabs3d/iilabs3d_dataset/benchmark/velodyne_vlp-16/ramp/ground_truth.tum",
+      "align_se2_rmse_m": {
+        "slamx": 0.10423581932381262,
+        "sampled_cartographer": 0.1558772985384022
+      },
+      "matched_pairs": 1823,
+      "matched_gt_segments": {
+        "matched": 1,
+        "total": 1
+      }
+    },
     "loop_2k_prefix": {
       "slice": "2k_prefix",
       "gt_coverage": "segmented_prefix_only",
@@ -112,13 +129,6 @@
         "Matched trajectory span covers only 47.7% of the trajectory time span.",
         "Matched pairs cover 1/2 GT segments."
       ]
-    }
-  },
-  "omitted_comparisons": {
-    "ramp_2k_vscan_bb": {
-      "slamx_run": "runs/iilabs_ramp_s2k_vscan_bb",
-      "available_sampled_cartographer_csv": "runs/iilabs_ramp_carto_at_slamx_s2k.csv",
-      "reason": "The current vscan+BB run does not share the same timestamp axis as the older 2D slamx run used to sample the available Cartographer CSV. Keep ramp in the experiment note until a like-for-like sampled Cartographer trajectory is regenerated."
     }
   }
 }

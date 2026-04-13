@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import shutil
 from pathlib import Path
@@ -1012,6 +1013,53 @@ def export_slamx_traj(
     """Export slamx trajectory.json to CSV (stamp_ns,x,y)."""
     p = export_trajectory_csv(run_dir, out_csv)
     typer.echo(json.dumps({"out": str(p)}, ensure_ascii=False))
+
+
+@app.command("sample-trajectory-to-timestamps")
+def sample_trajectory_to_timestamps_cmd(
+    source_traj: Annotated[
+        Path,
+        typer.Argument(help="Source trajectory (.csv/.json/.tum or run_dir)"),
+    ],
+    target_traj: Annotated[
+        Path,
+        typer.Argument(help="Target trajectory providing timestamps (.csv/.json/.tum or run_dir)"),
+    ],
+    out_csv: Annotated[Path, typer.Option("--out", "-o", help="Output CSV stamp_ns,x,y")] = Path(
+        "runs/sampled_traj.csv"
+    ),
+    max_dt_ms: Annotated[int, typer.Option(help="Nearest-neighbor association window (ms)")] = 50,
+) -> None:
+    """Sample a source trajectory onto another trajectory's timestamp axis."""
+    from slamx.core.evaluation.ate import load_estimated_trajectory, sample_trajectory_to_timestamps
+
+    source = load_estimated_trajectory(source_traj)
+    target = load_estimated_trajectory(target_traj)
+    sampled = sample_trajectory_to_timestamps(
+        source,
+        target.stamp_ns,
+        max_dt_ns=int(max_dt_ms) * 1_000_000,
+    )
+
+    out_csv.parent.mkdir(parents=True, exist_ok=True)
+    with out_csv.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["stamp_ns", "x", "y"])
+        for stamp_ns, xy in zip(sampled.stamp_ns, sampled.xy, strict=False):
+            writer.writerow([int(stamp_ns), float(xy[0]), float(xy[1])])
+
+    typer.echo(
+        json.dumps(
+            {
+                "out": str(out_csv),
+                "rows": len(sampled.stamp_ns),
+                "source_points": len(source.stamp_ns),
+                "target_points": len(target.stamp_ns),
+                "max_dt_ms": int(max_dt_ms),
+            },
+            ensure_ascii=False,
+        )
+    )
 
 @eval_app.command("ate")
 def eval_ate(
