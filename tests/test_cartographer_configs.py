@@ -37,6 +37,7 @@ def test_locked_cartographer_parity_configs_capture_expected_benchmark_values() 
 def test_working_cartographer_parity_configs_expose_loop_icp_overrides() -> None:
     medium = _load_config("cartographer_parity_medium.yaml")
     full = _load_config("cartographer_parity_full.yaml")
+    fast = _load_config("cartographer_parity_medium_loopicp_fast.yaml")
 
     medium_loop_icp = medium["slam"]["loop_detection"]["icp"]
     assert medium_loop_icp["max_iterations"] == 15
@@ -49,6 +50,10 @@ def test_working_cartographer_parity_configs_expose_loop_icp_overrides() -> None
     assert full_loop["icp"]["max_iterations"] == 15
     assert full_loop["icp"]["max_correspondence_dist_m"] == 1.0
 
+    fast_loop = fast["slam"]["loop_detection"]
+    assert fast_loop["detect_every_n"] == 5
+    assert fast_loop["icp"]["max_iterations"] == 15
+
 
 def test_cartographer_parity_full_config_drops_removed_optimization_window() -> None:
     cfg = _load_config("cartographer_parity_full.yaml")
@@ -58,6 +63,7 @@ def test_cartographer_parity_full_config_drops_removed_optimization_window() -> 
 def test_cartographer_parity_configs_still_build_local_slam_engine() -> None:
     for name in (
         "cartographer_parity_medium.yaml",
+        "cartographer_parity_medium_loopicp_fast.yaml",
         "cartographer_parity_medium_s300_locked.yaml",
         "cartographer_parity_noloop_s2k.yaml",
         "cartographer_parity_full.yaml",
@@ -65,7 +71,11 @@ def test_cartographer_parity_configs_still_build_local_slam_engine() -> None:
         cfg = _load_config(name)
         engine = _engine_from_config(cfg, telemetry=None)
         assert engine.cfg.pose_graph.max_iterations > 0
-        if name in {"cartographer_parity_medium.yaml", "cartographer_parity_full.yaml"}:
+        if name in {
+            "cartographer_parity_medium.yaml",
+            "cartographer_parity_medium_loopicp_fast.yaml",
+            "cartographer_parity_full.yaml",
+        }:
             assert engine.cfg.loop_icp.max_iterations == 15
             assert engine.cfg.loop_icp.max_correspondence_dist_m == 1.0
 
@@ -76,6 +86,7 @@ def test_cartographer_parity_configs_replay_fixture_smoke(tmp_path: Path) -> Non
 
     for name in (
         "cartographer_parity_medium.yaml",
+        "cartographer_parity_medium_loopicp_fast.yaml",
         "cartographer_parity_medium_s300_locked.yaml",
         "cartographer_parity_noloop_s2k.yaml",
         "cartographer_parity_full.yaml",

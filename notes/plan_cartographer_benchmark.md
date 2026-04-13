@@ -104,6 +104,17 @@
 - 最良ランは `enabled: true` でも結果的に受理 0 件で、local matching と pose graph の素直な一致性が支配的。
 - `submap-based loop reference` や `ICP refinement` は、短い一方向区間では単体で勝ち筋にならなかった。
 
+### 4.3 2026-04-14 追試: throttled loop-ICP working config
+
+- config: `configs/cartographer_parity_medium_loopicp_fast.yaml`
+- 差分: `slam.loop_detection.detect_every_n: 5` を追加し、explicit な `slam.loop_detection.icp` を維持
+- run: `runs/verify_cartographer_parity_medium_loopicp_fast_s300`
+- 300 scans 実測: **align 0.0805190088 m / no-align 0.4288311285 m / accepted 0 / rejected 145 / candidate events 39**
+- wall time: **356.52 s**
+
+この run は、`configs/cartographer_parity_medium.yaml` をそのまま 2026-04-14 に再走した partial run が **191 keyframes / 645 s / accepted 0 / rejected 294** で止まり、300 完走が非現実的だったため追加した tractability check。  
+少なくとも 300 scans では、**loop detection を every 5 frames に落としても数値は既知 best と同じ**だった。
+
 ## 5. 今日の実験から引いてよい結論
 
 ### 5.1 効いたもの

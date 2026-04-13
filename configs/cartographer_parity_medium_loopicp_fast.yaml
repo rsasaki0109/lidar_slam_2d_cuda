@@ -1,0 +1,48 @@
+# Experimental parity config for measuring explicit loop ICP without paying the
+# full every-frame loop-detection cost of cartographer_parity_medium.yaml.
+slam:
+  preprocess:
+    max_range: 30.0
+    stride: 4
+  local_matching:
+    type: correlative
+    correlative_grid:
+      linear_step_m: 0.05
+      angular_step_deg: 2.0
+      linear_window_m: 0.1
+      angular_window_deg: 20.0
+      sigma_hit_m: 0.15
+  submap:
+    max_submap_scans: 40
+    downsample_stride: 2
+  optimize_every_n_keyframes: 90
+  loop_detection:
+    enabled: true
+    detect_every_n: 5
+    search_radius_m: 4.0
+    min_separation_nodes: 100
+    max_candidates: 4
+    accept_score: -3.0
+    icp_accept_rms: 0.10
+    correlative_grid:
+      linear_step_m: 0.05
+      angular_step_deg: 2.0
+      linear_window_m: 0.5
+      angular_window_deg: 30.0
+      sigma_hit_m: 0.25
+    icp:
+      max_iterations: 15
+      max_correspondence_dist_m: 1.0
+      min_correspondences: 30
+      trim_fraction: 0.15
+  pose_graph:
+    max_iterations: 50
+    max_nfev_cap: 200000
+
+map:
+  occupancy_grid:
+    resolution_m: 0.05
+    size_x_m: 60.0
+    size_y_m: 60.0
+    origin_x_m: -30.0
+    origin_y_m: -30.0
