@@ -1466,14 +1466,31 @@ prefix align 推移（`top3_fallback_mid`）:
 
 | データセット | vscan+BB | 既存 2D best | Carto sampled | vs Carto |
 |---|---:|---:|---:|---|
-| elevator | **0.0148 m** | 0.0352 m | 0.1207 m | **8.2x better** |
-| slippage | **0.0764 m** | 0.1106 m | 0.3157 m | **4.1x better** |
-| nav_a_omni | **0.0601 m** | 0.0789 m | 0.1411 m | **2.3x better** |
-| nav_a_diff | **0.1187 m** | 0.1251 m | 0.1961 m | **1.7x better** |
-| loop | **0.1013 m** | 0.2470 m | 0.1853 m | **1.8x better** |
+| elevator | **0.0148 m** | 0.0352 m | 0.1364 m | **9.2x better** |
+| slippage | **0.0764 m** | 0.1106 m | 0.3665 m | **4.8x better** |
+| nav_a_omni | **0.0601 m** | 0.0789 m | 0.3841 m | **6.4x better** |
+| nav_a_diff | **0.1187 m** | 0.1251 m | 0.4703 m | **4.0x better** |
+| loop | **0.1013 m** | 0.2470 m | 0.2437 m | **2.4x better** |
 | ramp | **0.1042 m** | 0.4530 m | 0.1559 m | **1.5x better** |
 
 **全6データセットで Cartographer 同等以上を達成。**
+
+#### 2026-04-15 追補: strict sampled Cartographer を全 vscan+BB run に適用
+
+- sampled trajectory 生成に `slamx sample-trajectory-to-timestamps` を追加した
+- public-facing の正本 `notes/benchmark_iilabs_vs_cartographer_sampled_vlp16.json` は、これ以降すべて **その run 自身の timestamps に再サンプルした Cartographer** を使う
+- caveat:
+  - `loop`: GT segment `2/6` だけが overlap
+  - `elevator`: GT segment `1/2` かつ `234/2000` points だけが overlap
+
+主な sampled CSV:
+
+- `runs/iilabs_slippage_carto_at_slamx_vscan_bb.csv`
+- `runs/iilabs_nav_a_omni_carto_at_slamx_s2k_vscan_bb.csv`
+- `runs/iilabs_nav_a_diff_carto_at_slamx_s2k_vscan_bb.csv`
+- `runs/iilabs_loop_carto_at_slamx_s2k_vscan_bb.csv`
+- `runs/iilabs_elevator_carto_at_slamx_s2k_vscan_bb.csv`
+- `runs/iilabs_ramp_carto_at_slamx_s2k_vscan_bb.csv`
 
 #### 2026-04-14 追補: `ramp` を vscan timestamps で再採点
 

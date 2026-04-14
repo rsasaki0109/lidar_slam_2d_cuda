@@ -21,15 +21,20 @@ def test_iilabs_benchmark_note_tracks_timestamp_aligned_public_claims() -> None:
         comp = comparisons[name]
         assert comp["gt_coverage"] == "continuous"
         assert comp["align_se2_rmse_m"]["slamx"] < comp["align_se2_rmse_m"]["sampled_cartographer"]
+        assert comp["matched_pairs"]["slamx"] > 0
+        assert comp["matched_pairs"]["sampled_cartographer"] > 0
         assert comp["matched_gt_segments"] == {"matched": 1, "total": 1}
 
     loop = comparisons["loop_2k_prefix"]
     assert loop["gt_coverage"] == "segmented_prefix_only"
     assert loop["align_se2_rmse_m"]["slamx"] < loop["align_se2_rmse_m"]["sampled_cartographer"]
-    assert loop["matched_gt_segments"] == {"matched": 1, "total": 6}
+    assert loop["matched_pairs"] == {"slamx": 1415, "sampled_cartographer": 1415}
+    assert loop["matched_gt_segments"] == {"matched": 2, "total": 6}
+    assert any("2/6" in warning for warning in loop["warnings"])
 
     elevator = comparisons["elevator_2k_prefix"]
     assert elevator["gt_coverage"] == "segmented_prefix_only"
     assert elevator["align_se2_rmse_m"]["slamx"] < elevator["align_se2_rmse_m"]["sampled_cartographer"]
+    assert elevator["matched_pairs"] == {"slamx": 234, "sampled_cartographer": 232}
     assert elevator["matched_gt_segments"] == {"matched": 1, "total": 2}
-    assert any("Only 954/2000" in warning for warning in elevator["warnings"])
+    assert any("Only 234/2000" in warning for warning in elevator["warnings"])

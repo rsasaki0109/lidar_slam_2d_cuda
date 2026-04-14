@@ -8,7 +8,8 @@
     "scope_notes": [
       "This file is separate from backpack parity because backpack uses Cartographer pseudo GT.",
       "Only like-for-like timestamp-aligned sampled-Cartographer comparisons are listed here.",
-      "Segmented GT datasets are labeled prefix_only and should not be read as full-bag wins."
+      "Segmented GT datasets are labeled prefix_only and should not be read as full-bag wins.",
+      "As of 2026-04-15, every listed IILABS comparison uses the current sampled-Cartographer CSV generated on that run's own timestamp axis."
     ]
   },
   "public_summary": {
@@ -27,14 +28,17 @@
     "slippage_full": {
       "slice": "full",
       "gt_coverage": "continuous",
-      "slamx_run": "runs/iilabs_slippage_hybrid_refdense_cv_s2_refinegrid",
-      "sampled_cartographer_csv": "runs/iilabs_slippage_carto_at_slamx.csv",
+      "slamx_run": "runs/iilabs_slippage_vscan_bb",
+      "sampled_cartographer_csv": "runs/iilabs_slippage_carto_at_slamx_vscan_bb.csv",
       "gt": "data/iilabs3d/iilabs3d_dataset/benchmark/velodyne_vlp-16/slippage/ground_truth.tum",
       "align_se2_rmse_m": {
-        "slamx": 0.11064702649117769,
-        "sampled_cartographer": 0.3157390842556247
+        "slamx": 0.07635766747988497,
+        "sampled_cartographer": 0.36650580809859606
       },
-      "matched_pairs": 4164,
+      "matched_pairs": {
+        "slamx": 1034,
+        "sampled_cartographer": 1034
+      },
       "matched_gt_segments": {
         "matched": 1,
         "total": 1
@@ -43,14 +47,17 @@
     "nav_a_omni_2k": {
       "slice": "2k_prefix",
       "gt_coverage": "continuous",
-      "slamx_run": "runs/iilabs_nav_a_omni_s2k_hybrid_refdense_cv_s2_refinegrid",
-      "sampled_cartographer_csv": "runs/iilabs_nav_a_omni_carto_at_slamx_s2k.csv",
+      "slamx_run": "runs/iilabs_nav_a_omni_s2k_vscan_bb",
+      "sampled_cartographer_csv": "runs/iilabs_nav_a_omni_carto_at_slamx_s2k_vscan_bb.csv",
       "gt": "data/iilabs3d/iilabs3d_dataset/benchmark/velodyne_vlp-16/nav_a_omni/ground_truth.tum",
       "align_se2_rmse_m": {
-        "slamx": 0.07887824081221274,
-        "sampled_cartographer": 0.14112607888262163
+        "slamx": 0.06013008632879254,
+        "sampled_cartographer": 0.38406481049105745
       },
-      "matched_pairs": 2000,
+      "matched_pairs": {
+        "slamx": 2000,
+        "sampled_cartographer": 1998
+      },
       "matched_gt_segments": {
         "matched": 1,
         "total": 1
@@ -59,14 +66,17 @@
     "nav_a_diff_2k": {
       "slice": "2k_prefix",
       "gt_coverage": "continuous",
-      "slamx_run": "runs/iilabs_nav_a_diff_s2k_hybrid_refdense_cv_s2_refinegrid",
-      "sampled_cartographer_csv": "runs/iilabs_nav_a_diff_carto_at_slamx_s2k.csv",
+      "slamx_run": "runs/iilabs_nav_a_diff_s2k_vscan_bb",
+      "sampled_cartographer_csv": "runs/iilabs_nav_a_diff_carto_at_slamx_s2k_vscan_bb.csv",
       "gt": "data/iilabs3d/iilabs3d_dataset/benchmark/velodyne_vlp-16/nav_a_diff/ground_truth.tum",
       "align_se2_rmse_m": {
-        "slamx": 0.12509215409573074,
-        "sampled_cartographer": 0.19613204649466562
+        "slamx": 0.11866231299603322,
+        "sampled_cartographer": 0.47029875524272685
       },
-      "matched_pairs": 1967,
+      "matched_pairs": {
+        "slamx": 1994,
+        "sampled_cartographer": 1994
+      },
       "matched_gt_segments": {
         "matched": 1,
         "total": 1
@@ -82,7 +92,10 @@
         "slamx": 0.10423581932381262,
         "sampled_cartographer": 0.1558772985384022
       },
-      "matched_pairs": 1823,
+      "matched_pairs": {
+        "slamx": 1823,
+        "sampled_cartographer": 1823
+      },
       "matched_gt_segments": {
         "matched": 1,
         "total": 1
@@ -91,42 +104,49 @@
     "loop_2k_prefix": {
       "slice": "2k_prefix",
       "gt_coverage": "segmented_prefix_only",
-      "slamx_run": "runs/iilabs_loop_s2k_top3_fallback_mid_shortloop_mid",
-      "sampled_cartographer_csv": "runs/iilabs_loop_carto_at_slamx_s2k.csv",
+      "slamx_run": "runs/iilabs_loop_s2k_vscan_bb",
+      "sampled_cartographer_csv": "runs/iilabs_loop_carto_at_slamx_s2k_vscan_bb.csv",
       "gt": "data/iilabs3d/iilabs3d_dataset/benchmark/velodyne_vlp-16/loop/ground_truth.tum",
       "align_se2_rmse_m": {
-        "slamx": 0.1481032300289074,
-        "sampled_cartographer": 0.18528467089770295
+        "slamx": 0.10132304160010676,
+        "sampled_cartographer": 0.2437465167666777
       },
-      "matched_pairs": 1982,
+      "matched_pairs": {
+        "slamx": 1415,
+        "sampled_cartographer": 1415
+      },
       "matched_gt_segments": {
-        "matched": 1,
+        "matched": 2,
         "total": 6
       },
       "warnings": [
         "GT contains multiple time segments; unmatched trajectory time ranges may be ignored in ATE.",
-        "Matched pairs cover 1/6 GT segments."
+        "Only 1415/2000 trajectory points matched GT within the association window.",
+        "Matched pairs cover 2/6 GT segments."
       ]
     },
     "elevator_2k_prefix": {
       "slice": "2k_prefix",
       "gt_coverage": "segmented_prefix_only",
-      "slamx_run": "runs/iilabs_elevator_s2k_hybrid_refdense_cv_s2_refinegrid",
-      "sampled_cartographer_csv": "runs/iilabs_elevator_s2k_window_carto_at_slamx.csv",
+      "slamx_run": "runs/iilabs_elevator_s2k_vscan_bb",
+      "sampled_cartographer_csv": "runs/iilabs_elevator_carto_at_slamx_s2k_vscan_bb.csv",
       "gt": "data/iilabs3d/iilabs3d_dataset/benchmark/velodyne_vlp-16/elevator/ground_truth.tum",
       "align_se2_rmse_m": {
-        "slamx": 0.03515906993247076,
-        "sampled_cartographer": 0.1207190759517811
+        "slamx": 0.014832679724338656,
+        "sampled_cartographer": 0.1363870287281755
       },
-      "matched_pairs": 954,
+      "matched_pairs": {
+        "slamx": 234,
+        "sampled_cartographer": 232
+      },
       "matched_gt_segments": {
         "matched": 1,
         "total": 2
       },
       "warnings": [
         "GT contains multiple time segments; unmatched trajectory time ranges may be ignored in ATE.",
-        "Only 954/2000 trajectory points matched GT within the association window.",
-        "Matched trajectory span covers only 47.7% of the trajectory time span.",
+        "Only 234/2000 trajectory points matched GT within the association window.",
+        "Matched trajectory span covers only 11.7% of the trajectory time span.",
         "Matched pairs cover 1/2 GT segments."
       ]
     }

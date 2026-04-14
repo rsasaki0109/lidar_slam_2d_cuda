@@ -54,9 +54,9 @@ BENCHMARK_CARDS = [
     BenchmarkCard(
         label="IILABS loop 2k",
         reference_label="Cartographer sampled",
-        reference_path=ROOT / "runs" / "iilabs_loop_carto_at_slamx_s2k.csv",
-        slamx_label="lidar_slam_2d best",
-        slamx_path=ROOT / "runs" / "iilabs_loop_s2k_top3_fallback_mid_shortloop_mid",
+        reference_path=ROOT / "runs" / "iilabs_loop_carto_at_slamx_s2k_vscan_bb.csv",
+        slamx_label="lidar_slam_2d vscan+BB",
+        slamx_path=ROOT / "runs" / "iilabs_loop_s2k_vscan_bb",
         gt_path=ROOT
         / "data"
         / "iilabs3d"
@@ -69,9 +69,9 @@ BENCHMARK_CARDS = [
     BenchmarkCard(
         label="IILABS slippage full",
         reference_label="Cartographer sampled",
-        reference_path=ROOT / "runs" / "iilabs_slippage_carto_at_slamx.csv",
-        slamx_label="lidar_slam_2d best",
-        slamx_path=ROOT / "runs" / "iilabs_slippage_hybrid_refdense_cv_s2_refinegrid",
+        reference_path=ROOT / "runs" / "iilabs_slippage_carto_at_slamx_vscan_bb.csv",
+        slamx_label="lidar_slam_2d vscan+BB",
+        slamx_path=ROOT / "runs" / "iilabs_slippage_vscan_bb",
         gt_path=ROOT
         / "data"
         / "iilabs3d"
@@ -98,7 +98,7 @@ OVERLAY_PANELS = [
     ),
     OverlayPanel(
         label="IILABS loop 2k",
-        slamx_path=ROOT / "runs" / "iilabs_loop_s2k_top3_fallback_mid_shortloop_mid",
+        slamx_path=ROOT / "runs" / "iilabs_loop_s2k_vscan_bb",
         reference_path=ROOT
         / "data"
         / "iilabs3d"
@@ -111,7 +111,7 @@ OVERLAY_PANELS = [
     ),
     OverlayPanel(
         label="IILABS slippage full",
-        slamx_path=ROOT / "runs" / "iilabs_slippage_hybrid_refdense_cv_s2_refinegrid",
+        slamx_path=ROOT / "runs" / "iilabs_slippage_vscan_bb",
         reference_path=ROOT
         / "data"
         / "iilabs3d"
