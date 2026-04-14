@@ -1579,7 +1579,57 @@ config: `configs/iilabs_vscan_bb_loop_fast.yaml`
 - `min_separation_nodes: 200`
 - `optimize_adaptive_from_node: 500` (長時間最適化を間引き)
 
-loop full bag を実行中。結果は追記予定。
+補助 CLI:
+
+- `slamx export-telemetry-keyframes <run_dir> --out <csv>` を追加
+- 中断 run でも `telemetry.jsonl` の `keyframe` event から trajectory CSV を復元して ATE を採点できる
+
+#### 2026-04-15 中間評価: interrupted full-bag runs
+
+`trajectory.json` が残っていない中断 run について、`telemetry.jsonl` から keyframe CSV を復元して評価した。
+
+`loop` full:
+
+- baseline (`runs/iilabs_loop_full_vscan_bb`): full 完走、align `0.3910 m`
+- `loop_fast` partial:
+  - source: `runs/iilabs_loop_full_vscan_bb_loop_fast/telemetry.jsonl`
+  - keyframes: `4900`
+  - loop accepted / rejected: `439 / 275`
+  - GT coverage: `2866` matched pairs, `5/6` GT segments
+  - ATE: `align 0.1971 m`
+  - no-loop baseline sampled to the same timestamps: `0.2949 m`
+  - Cartographer sampled to the same timestamps: `0.2291 m`
+- `loop_tight` partial:
+  - source: `runs/iilabs_loop_full_vscan_bb_loop_tight/telemetry.jsonl`
+  - keyframes: `3934`
+  - loop accepted / rejected: `805 / 1023`
+  - GT coverage: `2408` matched pairs, `4/6` GT segments
+  - ATE: `align 0.1719 m`
+  - no-loop baseline sampled to the same timestamps: `0.2064 m`
+  - Cartographer sampled to the same timestamps: `0.2364 m`
+
+読み方:
+
+- `loop_fast` は **full 完走前の 5 セグメント時点で、no-loop baseline (`0.2949`) と Cartographer sampled (`0.2291`) の両方を上回った**
+- `loop_tight` も改善しているが、accepted/rejected が多く、到達範囲も `loop_fast` より短い
+- したがって、**full rerun の第一候補は `loop_fast`**。`tight` は「さらに攻める」第二候補に下げてよい
+
+`nav_a_diff` full:
+
+- baseline (`runs/iilabs_nav_a_diff_full_vscan_bb`): full 完走、align `0.2395 m`
+- loop partial (`runs/iilabs_nav_a_diff_full_vscan_bb_loop/telemetry.jsonl`):
+  - keyframes: `1220`
+  - loop accepted / rejected: `427 / 14`
+  - GT coverage: `1214` matched pairs
+  - ATE: `align 0.0947 m`
+  - no-loop baseline sampled to the same timestamps: `0.0960 m`
+  - Cartographer sampled to the same timestamps: `0.3218 m`
+
+読み方:
+
+- `nav_a_diff` は **最初の約123秒では loop closure の上乗せ効果がほぼない**
+- しかも accepted edge 数は多いので、現状では `loop` ほどの費用対効果が見えない
+- したがって **次の full rerun は `loop` を先、`nav_a_diff` は後** でよい
 
 ## 17. コードベース全体像 (2026-04-14 時点)
 

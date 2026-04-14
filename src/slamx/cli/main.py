@@ -1015,6 +1015,47 @@ def export_slamx_traj(
     typer.echo(json.dumps({"out": str(p)}, ensure_ascii=False))
 
 
+@app.command("export-telemetry-keyframes")
+def export_telemetry_keyframes(
+    source: Annotated[
+        Path,
+        typer.Argument(help="Run directory or telemetry.jsonl path"),
+    ],
+    out_csv: Annotated[Path, typer.Option("--out", "-o", help="Output CSV stamp_ns,x,y")] = Path(
+        "runs/telemetry_keyframes.csv"
+    ),
+) -> None:
+    """Export keyframe poses from telemetry.jsonl to CSV (stamp_ns,x,y)."""
+    telemetry_path = source / "telemetry.jsonl" if source.is_dir() else source
+    if telemetry_path.name != "telemetry.jsonl":
+        raise typer.BadParameter("source must be a run dir or telemetry.jsonl path")
+    if not telemetry_path.exists():
+        raise FileNotFoundError(telemetry_path)
+
+    rows_written = 0
+    out_csv.parent.mkdir(parents=True, exist_ok=True)
+    with telemetry_path.open("r", encoding="utf-8") as src, out_csv.open(
+        "w", encoding="utf-8", newline=""
+    ) as dst:
+        writer = csv.writer(dst)
+        writer.writerow(["stamp_ns", "x", "y"])
+        for raw in src:
+            raw = raw.strip()
+            if not raw:
+                continue
+            row = json.loads(raw)
+            if row.get("type") != "keyframe":
+                continue
+            pose = row.get("pose") or {}
+            stamp_ns = row.get("stamp_ns")
+            if stamp_ns is None or "x" not in pose or "y" not in pose:
+                continue
+            writer.writerow([int(stamp_ns), float(pose["x"]), float(pose["y"])])
+            rows_written += 1
+
+    typer.echo(json.dumps({"out": str(out_csv), "rows": rows_written}, ensure_ascii=False))
+
+
 @app.command("sample-trajectory-to-timestamps")
 def sample_trajectory_to_timestamps_cmd(
     source_traj: Annotated[
