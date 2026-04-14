@@ -1607,12 +1607,23 @@ config: `configs/iilabs_vscan_bb_loop_fast.yaml`
   - ATE: `align 0.1719 m`
   - no-loop baseline sampled to the same timestamps: `0.2064 m`
   - Cartographer sampled to the same timestamps: `0.2364 m`
+- `loop_fast` rerun snapshot (`2026-04-15`, 実行継続中):
+  - live run dir: `runs/iilabs_loop_full_vscan_bb_loop_fast_rerun`
+  - evaluated snapshot source: `runs/iilabs_loop_full_vscan_bb_loop_fast_rerun/telemetry.jsonl`
+  - evaluated snapshot keyframes: `4766`
+  - evaluated snapshot GT coverage: `2732` matched pairs, `5/6` GT segments
+  - evaluated snapshot ATE: `align 0.1900 m`
+  - no-loop baseline sampled to the same timestamps: `0.2428 m`
+  - Cartographer sampled to the same timestamps: `0.2294 m`
+  - live status at `2026-04-15 12:09 JST`: `5261` keyframes, loop accepted / rejected `478 / 308`
 
 読み方:
 
 - `loop_fast` は **full 完走前の 5 セグメント時点で、no-loop baseline (`0.2949`) と Cartographer sampled (`0.2291`) の両方を上回った**
+- `loop_fast` rerun でも、**完走前の別 snapshot (`0.1900`) で no-loop baseline (`0.2428`) と Cartographer sampled (`0.2294`) の両方を再度上回った**
 - `loop_tight` も改善しているが、accepted/rejected が多く、到達範囲も `loop_fast` より短い
 - したがって、**full rerun の第一候補は `loop_fast`**。`tight` は「さらに攻める」第二候補に下げてよい
+- ただし `2026-04-15 12:09 JST` 時点でも rerun は未完走なので、最終判断は full ATE を待つ
 
 `nav_a_diff` full:
 
