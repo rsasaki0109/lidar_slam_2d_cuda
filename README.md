@@ -1,10 +1,10 @@
-# lidar_slam_2d
+# lidar_slam_2d_cuda
 
-Modern 2D LiDAR SLAM experiment platform with a ROS-free core and a CLI-first workflow for replay, evaluation, and benchmark iteration.
+Modern 2D LiDAR SLAM experiment platform with a ROS-free core and a CLI-first workflow for replay, evaluation, and benchmark iteration. Research line is moving toward CUDA-accelerated fixed-lag scan-level bundle adjustment.
 
-![lidar_slam_2d benchmark summary](docs/assets/benchmark-summary.svg)
+![lidar_slam_2d_cuda benchmark summary](docs/assets/benchmark-summary.svg)
 
-![lidar_slam_2d trajectory gallery](docs/assets/trajectory-gallery.svg)
+![lidar_slam_2d_cuda trajectory gallery](docs/assets/trajectory-gallery.svg)
 
 ## Why this repo is worth publishing now
 
@@ -20,7 +20,7 @@ slamx replay examples/fixture_scans.jsonl --out runs/demo --no-write-map
 slamx eval ate runs/demo --gt runs/cartographer_traj_s300_window.csv
 ```
 
-The published project name is **`lidar_slam_2d`**. The CLI command remains **`slamx`** for now.
+The published project name is **`lidar_slam_2d_cuda`**. The CLI command remains **`slamx`** for now.
 
 Optional ROS bag support:
 
