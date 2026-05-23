@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import math
 
-import numpy as np
 import pytest
 
 from slamx.core.scan_ba import (
@@ -109,7 +108,6 @@ def test_anchor_pins_first_pose():
 
 
 def test_slide_window_drops_oldest_and_bakes_anchor():
-    tsdf = _make_l_room_tsdf()
     poses = [Pose2(1.0, 0.5, 0.0), Pose2(1.2, 0.6, 0.05), Pose2(1.4, 0.7, 0.1)]
     scans = [_raycast_scan(p) for p in poses]
     mps = [MotionPrior() for _ in range(2)]
