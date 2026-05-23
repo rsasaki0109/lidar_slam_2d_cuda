@@ -85,10 +85,26 @@ kernel 群:
 ## 8. 段階的ロードマップ
 
 - **P0 (1 週目)**: 既存 Python pipeline で **CPU 実装の scan-to-SDF 最適化** を 1 scan 単位で書く（pose 3 dof のみ）。リファレンス実装。
-- **P1**: P0 を K=10 のウィンドウに拡張、CPU で動かす。motion prior と marginalize-as-prior。
-- **P2**: CUDA 移植。kernel_residual_and_jacobian + 3K×3K Cholesky まで GPU。これでフロントエンドとして既存 pose graph と差し替えても動くようにする。
+- **P1**: P0 を K=10 のウィンドウに拡張、CPU で動かす。motion prior と marginalize-as-prior。【done】
+- **P1.5**: `ScanBaEngine` を `slamx replay` に統合。online ローカル sliding TSDF で実 bag 追従。【done】
+- **P2**: CUDA 移植。kernel_residual_and_jacobian + 3K×3K Cholesky まで GPU。【一部done: cupy 版 data-block (`scan_ba/cuda.py`) が CPU と一致】
 - **P3**: SDF を変数化、Schur 込みで joint BA。
 - **P4**: 厳密 marginalization (Schur で先頭 pose を消し、隣接 pose と SDF 境界に prior 残す) と loop closure 連動。
+
+### P2 ベンチ所見 (2026-05-24, GPU, cupy 14.1, CUDA 12.0)
+
+per-scan data-block (sample+Jacobian+JtWJ/JtWr) を cupy で実装、TSDF 常駐・30反復平均:
+
+| 点数 N | CPU (numpy) | GPU (cupy) | speedup |
+|--------|-------------|------------|---------|
+| 2,000   | 0.38 ms | 3.01 ms | 0.1x |
+| 20,000  | 2.21 ms | 2.74 ms | 0.8x |
+| 100,000 | 11.66 ms | 3.00 ms | 3.9x |
+
+- **2D の 1 scan 規模 (~2000 点) では GPU が遅い**。原因は per-call の host 同期 (`n_valid`/`cost` の `.get()`) と小さい reduction のカーネル launch overhead。
+- GPU が勝つのは 100k 点級。現状の素朴 cupy 移植は「大きい問題」向け。
+- **示唆**: 実用 2D scan-BA で GPU を活かすには (a) ウィンドウ全 scan の点を 1 カーネルにバッチ、(b) LM 反復中の host 同期を排除し全反復を on-device 化、(c) sample+Jacobian+reduction を 1 つの fused custom kernel に。CUDA_PATH は `/usr` (cupy JIT が headers を要求、`scan_ba/cuda.py` が自動 setdefault)。
+- CPU フォールバックは維持。`cuda.is_available()` 偽なら自動 skip。
 
 ## 9. オープン問題 / リスク
 

@@ -16,6 +16,7 @@ dependencies = [
 
 [project.optional-dependencies]
 rosbag = ["rosbags>=0.9"]
+cuda = ["cupy-cuda12x>=13"]
 dev = ["pytest>=7.4", "ruff>=0.3"]
 
 [project.scripts]
