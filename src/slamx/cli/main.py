@@ -37,8 +37,50 @@ bench_app = typer.Typer(no_args_is_help=True, add_completion=False)
 app.add_typer(bench_app, name="bench")
 
 
-def _engine_from_config(cfg: dict[str, Any], telemetry: JsonlTelemetry | None) -> LocalSlamEngine:
+def _scan_ba_engine_from_config(cfg: dict[str, Any], telemetry: JsonlTelemetry | None):
+    from slamx.core.preprocess.pipeline import PreprocessConfig
+    from slamx.core.scan_ba.engine import ScanBaEngine, ScanBaEngineConfig
+    from slamx.core.scan_ba.tsdf import Tsdf2DConfig
+
     slam = cfg.get("slam", {})
+    preprocess = slam.get("preprocess", {})
+    sb = slam.get("scan_ba", {}) or {}
+    tsdf = sb.get("tsdf", {}) or {}
+
+    engine_cfg = ScanBaEngineConfig(
+        preprocess=PreprocessConfig(
+            min_range=preprocess.get("min_range"),
+            max_range=preprocess.get("max_range"),
+            stride=int(preprocess.get("stride", 1)),
+            min_angle_deg=preprocess.get("min_angle_deg"),
+            max_angle_deg=preprocess.get("max_angle_deg"),
+        ),
+        tsdf=Tsdf2DConfig(
+            resolution_m=float(tsdf.get("resolution_m", 0.05)),
+            origin_x_m=float(tsdf.get("origin_x_m", -20.0)),
+            origin_y_m=float(tsdf.get("origin_y_m", -20.0)),
+            size_x_m=float(tsdf.get("size_x_m", 40.0)),
+            size_y_m=float(tsdf.get("size_y_m", 40.0)),
+            truncation_m=float(tsdf.get("truncation_m", 0.4)),
+        ),
+        window_size=int(sb.get("window_size", 10)),
+        seed_scans=int(sb.get("seed_scans", 3)),
+        motion_prior_info_xy=float(sb.get("motion_prior_info_xy", 5.0)),
+        motion_prior_info_theta=float(sb.get("motion_prior_info_theta", 5.0)),
+        anchor_info_xy=float(sb.get("anchor_info_xy", 1.0e5)),
+        anchor_info_theta=float(sb.get("anchor_info_theta", 1.0e5)),
+        huber_delta_m=float(sb.get("huber_delta_m", 0.15)),
+        optimize_max_iters=int(sb.get("optimize_max_iters", 20)),
+        prediction_mode=str(slam.get("prediction", {}).get("mode", "constant_velocity")),
+    )
+    return ScanBaEngine(cfg=engine_cfg, telemetry=telemetry)
+
+
+def _engine_from_config(cfg: dict[str, Any], telemetry: JsonlTelemetry | None):
+    slam = cfg.get("slam", {})
+    frontend = str(slam.get("frontend", "pose_graph")).lower()
+    if frontend in {"scan_ba", "scanba", "bundle", "cuda"}:
+        return _scan_ba_engine_from_config(cfg, telemetry)
     preprocess = slam.get("preprocess", {})
     lm = slam.get("local_matching", {}) or {}
     matcher_type = str(lm.get("type", "correlative"))
