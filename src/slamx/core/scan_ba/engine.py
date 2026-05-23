@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from slamx.core.backend.pose_graph import Edge, PoseGraph, PoseGraphConfig
 from slamx.core.io.bag import ImuSample
 from slamx.core.observability import JsonlTelemetry
 from slamx.core.preprocess.pipeline import PreprocessConfig, preprocess_scan
@@ -39,16 +40,18 @@ class ScanBaEngineConfig:
     # bootstrap (spurious minima) and large mis-registrations.
     min_inlier_ratio: float = 0.25
     max_step_m: float = 1.0
-
-
-@dataclass
-class _GraphShim:
-    """Minimal stand-in for PoseGraph so the replay CLI can read poses uniformly."""
-
-    poses: list[Pose2] = field(default_factory=list)
-
-    def optimize(self) -> dict:
-        return {"backend": "scan_ba", "skipped_global_optimize": True}
+    # loop closure (CudaRobotics gpu_online_slam style): distance-based detection
+    # against past nodes, TSDF-verified, then a global pose-graph solve. The fixed-lag
+    # window is the front-end odometry; the pose graph corrects accumulated drift.
+    loop_closure_enabled: bool = False
+    loop_detect_every_n: int = 5
+    loop_dist_m: float = 2.5
+    loop_min_gap: int = 30
+    loop_max_candidates: int = 2
+    loop_submap_window: int = 10  # scans around a candidate used to build its verify TSDF
+    loop_accept_inlier_ratio: float = 0.55
+    loop_accept_cost: float = 0.05
+    loop_max_correction_m: float = 1.5  # reject verify poses too far from odom prediction
 
 
 @dataclass
@@ -62,14 +65,15 @@ class ScanBaEngine:
     cfg: ScanBaEngineConfig = field(default_factory=ScanBaEngineConfig)
     telemetry: JsonlTelemetry | None = None
 
-    graph: _GraphShim = field(init=False)
+    graph: PoseGraph = field(init=False)
     _tsdf: Tsdf2D = field(init=False, repr=False)
     _scans: list[np.ndarray] = field(default_factory=list, repr=False)
     _stamps: list[int | None] = field(default_factory=list)
     _last_rel: Pose2 | None = field(default=None, init=False)
+    _loop_edges: set[tuple[int, int]] = field(default_factory=set, repr=False)
 
     def __post_init__(self) -> None:
-        self.graph = _GraphShim(poses=[])
+        self.graph = PoseGraph(cfg=PoseGraphConfig(max_iterations=50))
         self._tsdf = Tsdf2D.zeros(self.cfg.tsdf)
 
     def set_imu_buffer(self, samples: list[ImuSample]) -> None:  # noqa: ARG002 - parity stub
@@ -194,12 +198,89 @@ class ScanBaEngine:
             score = res.final_cost
 
         prev = self.graph.poses[-1]
-        self._last_rel = prev.inverse().compose(pose)
-        self.graph.poses.append(pose)
+        rel = prev.inverse().compose(pose)
+        self._last_rel = rel
+        node = self.graph.add_pose(pose)
+        self.graph.add_edge(Edge(i=node - 1, j=node, rel=rel))
         self._scans.append(pts)
         self._stamps.append(scan.stamp_ns)
-        self._emit(len(self.graph.poses) - 1, pose, score=score)
-        return pose
+        self._emit(node, pose, score=score)
+
+        if (
+            self.cfg.loop_closure_enabled
+            and node % max(1, self.cfg.loop_detect_every_n) == 0
+        ):
+            self._try_loop_closure(node, pts)
+
+        return self.graph.poses[node]
+
+    def _try_loop_closure(self, node: int, pts: np.ndarray) -> None:
+        """Detect distance-based loops against past nodes, verify by TSDF
+        alignment, add accepted loop edges, then run a global pose-graph solve."""
+        cur = self.graph.poses[node]
+        # spatial candidates with a time gap
+        cands: list[tuple[float, int]] = []
+        for j in range(0, node - self.cfg.loop_min_gap):
+            pj = self.graph.poses[j]
+            d = float(np.hypot(cur.x - pj.x, cur.y - pj.y))
+            if d < self.cfg.loop_dist_m:
+                cands.append((d, j))
+        if not cands:
+            return
+        cands.sort(key=lambda c: c[0])
+
+        n_pts = int(pts.shape[0])
+        added = False
+        for _, j in cands[: self.cfg.loop_max_candidates]:
+            if (j, node) in self._loop_edges:
+                continue
+            verify_tsdf = self._build_submap_tsdf(j)
+            res = align_scan_to_tsdf(
+                tsdf=verify_tsdf,
+                scan_xy=pts,
+                pose_init=cur,
+                max_iters=self.cfg.optimize_max_iters,
+                huber_delta_m=self.cfg.huber_delta_m,
+            )
+            inl_ratio = (res.num_inliers / n_pts) if n_pts else 0.0
+            corr = float(np.hypot(res.pose.x - cur.x, res.pose.y - cur.y))
+            if (
+                res.converged
+                and inl_ratio >= self.cfg.loop_accept_inlier_ratio
+                and res.final_cost <= self.cfg.loop_accept_cost
+                and corr <= self.cfg.loop_max_correction_m
+            ):
+                rel = self.graph.poses[j].inverse().compose(res.pose)
+                self.graph.add_edge(Edge(i=j, j=node, rel=rel))
+                self._loop_edges.add((j, node))
+                added = True
+                if self.telemetry:
+                    self.telemetry.emit(
+                        "loop_closure_accepted",
+                        {"node": node, "i": j, "inlier_ratio": inl_ratio, "cost": res.final_cost},
+                    )
+
+        if added:
+            opt = self.graph.optimize()
+            if self.telemetry:
+                self.telemetry.emit("optimization", {"node": node, **opt})
+            self._last_rel = self.graph.poses[-2].inverse().compose(self.graph.poses[-1])
+
+    def _build_submap_tsdf(self, center: int) -> Tsdf2D:
+        """Build a verification TSDF from scans near node `center` at their poses."""
+        tsdf = Tsdf2D.zeros(self.cfg.tsdf)
+        w = max(1, self.cfg.loop_submap_window)
+        lo = max(0, center - w)
+        hi = min(len(self._scans), center + w + 1)
+        for i in range(lo, hi):
+            update_tsdf_from_scan(
+                tsdf,
+                pose_map=self.graph.poses[i],
+                points_sensor=self._scans[i],
+                weight_inc=self.cfg.tsdf_weight_inc,
+                weight_max=self.cfg.tsdf_weight_max,
+            )
+        return tsdf
 
     def _emit(self, node: int, pose: Pose2, *, score: float) -> None:
         if not self.telemetry:
