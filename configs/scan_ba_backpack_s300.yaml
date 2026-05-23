@@ -1,0 +1,36 @@
+# Scan-level BA (CPU reference) frontend on Cartographer backpack_2d.
+# Compare against runs/cartographer_traj_s300_window.csv (300-scan pseudo-GT window).
+# A wide TSDF truncation gives a broad convergence basin so the gradient tracker
+# catches the backpack's acceleration (narrow truncation under-tracks badly).
+slam:
+  frontend: scan_ba
+  preprocess:
+    max_range: 30.0
+    stride: 4
+  scan_ba:
+    window_size: 10
+    seed_scans: 3
+    map_window: 20
+    huber_delta_m: 0.25
+    optimize_max_iters: 25
+    motion_prior_info_xy: 3.0
+    motion_prior_info_theta: 3.0
+    anchor_info_xy: 1.0e5
+    anchor_info_theta: 1.0e5
+    tsdf:
+      resolution_m: 0.05
+      origin_x_m: -30.0
+      origin_y_m: -30.0
+      size_x_m: 60.0
+      size_y_m: 60.0
+      truncation_m: 0.6
+  prediction:
+    mode: constant_velocity
+
+map:
+  occupancy_grid:
+    resolution_m: 0.05
+    size_x_m: 60.0
+    size_y_m: 60.0
+    origin_x_m: -30.0
+    origin_y_m: -30.0
