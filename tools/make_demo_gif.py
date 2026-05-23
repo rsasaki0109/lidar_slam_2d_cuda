@@ -46,23 +46,26 @@ def _load_preprocess(config_path: Path | None) -> PreprocessConfig:
     )
 
 
-def _dead_reckoning(scans: list, pre: PreprocessConfig) -> list[Pose2]:
-    """Scan-to-scan ICP integrated with no global map (drifts)."""
+def _dead_reckoning(scans: list, pre: PreprocessConfig, ref_window: int = 4) -> list[Pose2]:
+    """Front-end odometry only: ICP against the last `ref_window` scans, integrated
+    with no global map / no loop closure. Drifts gradually (no constant-velocity
+    extrapolation, so featureless spots stall rather than spiral)."""
     icp = IcpScanMatcher(
         IcpConfig(max_iterations=25, max_correspondence_dist_m=1.0, min_correspondences=20, trim_fraction=0.2)
     )
     poses = [Pose2(0.0, 0.0, 0.0)]
-    last_rel = Pose2(0.0, 0.0, 0.0)
-    prev_scan = scans[0]
     for k in range(1, len(scans)):
         prev_pose = poses[-1]
-        ref_map = transform_points_xy(prev_pose.as_se2(), prev_scan.points_xy())
-        prediction = prev_pose.compose(last_rel)  # constant-velocity guess
-        mr = icp.match(scan=scans[k], prediction_map=prediction, ref_points_xy_map=ref_map)
-        pose = mr.pose_map
-        last_rel = prev_pose.inverse().compose(pose)
-        poses.append(pose)
-        prev_scan = scans[k]
+        # reference = recent scans in their DR poses (scan-to-recent-submap odometry)
+        lo = max(0, k - ref_window)
+        ref_parts = []
+        for m in range(lo, k):
+            p = scans[m].points_xy()
+            if p.size:
+                ref_parts.append(transform_points_xy(poses[m].as_se2(), p))
+        ref_map = np.concatenate(ref_parts) if ref_parts else np.zeros((0, 2))
+        mr = icp.match(scan=scans[k], prediction_map=prev_pose, ref_points_xy_map=ref_map)
+        poses.append(mr.pose_map)
     return poses
 
 
@@ -137,7 +140,7 @@ def main() -> None:
         ax.set_xticks([])
         ax.set_yticks([])
         ax.set_aspect("equal")
-    axl.set_title("dead reckoning (scan-to-scan odometry)", color="#f87171", fontsize=13)
+    axl.set_title("dead reckoning (odometry only)", color="#f87171", fontsize=13)
     axr.set_title("scan-BA core", color="#60a5fa", fontsize=13)
 
     frames = list(range(0, n, args.frame_stride))
@@ -152,7 +155,7 @@ def main() -> None:
             ax.set_xticks([])
             ax.set_yticks([])
             ax.set_aspect("equal")
-        axl.set_title("dead reckoning (scan-to-scan odometry)", color="#f87171", fontsize=13)
+        axl.set_title("dead reckoning (odometry only)", color="#f87171", fontsize=13)
         axr.set_title("scan-BA core", color="#60a5fa", fontsize=13)
 
         k = frame_idx
