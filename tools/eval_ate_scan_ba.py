@@ -37,13 +37,18 @@ def _variant_cfg(base: dict, variant: str) -> dict:
     cfg = copy.deepcopy(base)
     sb = cfg["slam"].setdefault("scan_ba", {})
     if variant == "pose_only":
-        sb.update(use_joint=False, use_cuda=False)
+        sb.update(use_joint=False, use_cuda=False, use_marginalization=False)
     elif variant == "joint":
-        sb.update(use_joint=True, use_cuda=False)
+        sb.update(use_joint=True, use_cuda=False, use_marginalization=False)
     elif variant == "joint_smooth":
         sb.update(use_joint=True, use_cuda=False, joint_sdf_smooth_info=1.0)
     elif variant == "cuda":
         sb.update(use_joint=False, use_cuda=True)
+    elif variant == "marg":
+        # exact sliding-window marginalization vs the heuristic strong anchor (P4.1)
+        sb.update(use_joint=False, use_cuda=False, use_marginalization=True)
+    elif variant == "joint_marg":
+        sb.update(use_joint=True, use_cuda=False, use_marginalization=True)
     else:
         raise ValueError(f"unknown variant {variant!r}")
     return cfg

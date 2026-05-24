@@ -88,8 +88,10 @@ kernel 群:
 - **P1**: P0 を K=10 のウィンドウに拡張、CPU で動かす。motion prior と marginalize-as-prior。【done】
 - **P1.5**: `ScanBaEngine` を `slamx replay` に統合。online ローカル sliding TSDF で実 bag 追従。【done】
 - **P2**: CUDA 移植。kernel_residual_and_jacobian + 3K×3K Cholesky まで GPU。【一部done: cupy 版 data-block (`scan_ba/cuda.py`) が CPU と一致】
-- **P3**: SDF を変数化、Schur 込みで joint BA。【P3.0 done: CPU dense リファレンス `scan_ba/joint.py`】
-- **P4**: 厳密 marginalization (Schur で先頭 pose を消し、隣接 pose と SDF 境界に prior 残す) と loop closure 連動。
+- **P3**: SDF を変数化、Schur 込みで joint BA。【done: P3.0 dense → P3.1 疎 Schur → P3.2 平滑化 → P3.3 engine 配線+ATE → P3.4 GPU Schur(負) → P3.5 full-GPU assemble(交差点あり/小窓は負)】
+- **P4**: 厳密 marginalization (Schur で先頭 pose を消し隣接 pose に prior 残す)。【done: P4 アルゴ리즘 + P4.1 engine hot loop 採用 `use_marginalization`】
+- **P-map**: 永続グローバル TSDF マップ（ループ閉じ込みで補正後 pose から再構築）。【done: `GlobalTsdfMap`, `build_global_map`】
+- **P-eval**: 大規模 ATE（600 scan × 4 変種）で joint / marginalization の利得を定量化。【done: joint は大規模でも頑健に効く（−24% rmse）、厳密 marginalization は実走行で利得なし（正直な負の結果）】
 
 ### P3.0 所見 (2026-05-25): joint pose+SDF BA (CPU dense リファレンス)
 
@@ -149,7 +151,47 @@ Cartographer backpack_2d を 300 scan replay → Cartographer 軌跡（疑似GT,
 - この固定ラグ窓では最古 pose（pose 0）は pose 1 とのみ factor を共有（motion prior）。data 項・anchor・前回の marginal prior は pose 0 の unary。よって pose 0 を消すと pose 1 に **3×3 の `MarginalizationPrior`** が残る。
 - `E(x) = ½(x−x_lin)ᵀΛ(x−x_lin) + gᵀ(x−x_lin)`。`window._evaluate` の (H += Λ, b += Λδ+g) 規約に一致。`WindowState.marg_prior` として畳み込む。
 - **厳密性をテストで証明**: 実 data+motion+anchor で組んだフル窓を 1 GN ステップ解いた retained pose の増分と、pose 0 を marginalize して縮約窓を解いた増分が**完全一致**（単段・再帰 marginalization とも atol 1e-9）。線形/ガウスでは first-estimate Jacobians により厳密。
-- `slide_window(marginalize=True, tsdf=...)` で再帰的に marginal prior を更新。engine の hot loop への採用（relinearization/FEJ の扱い）は P4.1 として保留。
+- `slide_window(marginalize=True, tsdf=...)` で再帰的に marginal prior を更新。
+
+### P4.1 所見 (2026-05-25): marginalization を engine hot loop へ採用
+
+`ScanBaEngine` に `use_marginalization` を追加。窓が pose を落とすたびに、その pose を Schur 消去して新しい最古 pose 上の `MarginalizationPrior` を作り（`_update_marginalization`）、強 anchor を置き換える。`_marg_prior`/`_marg_idx` を保持し再帰更新。
+
+- 落とす pose の data 項は**そのステップのローカルマップで線形化（first-estimate Jacobians）**。次ステップでローカルマップは作り直されるが prior の Jacobian は固定 — 標準的な FEJ。
+- 窓成長中（まだ pose を落とさない）は anchor のまま。最初に落とす瞬間の marginalization に元の anchor を含めるので**ゲージは保存**される。
+- CPU / joint パス専用（GPU 常駐マップはホスト上に TSDF が無く線形化できないので `use_cuda` 時は無効）。joint ソルバの正規方程式・コストにも prior を配線。
+- クリーンな合成走行では anchor とほぼ同一軌跡（anchor 自体が tight な pin のため）。利得は長時間・ループ閉じ込み時の情報整合性で出る想定。
+
+### P3.5 所見 (2026-05-25): joint の gather+assemble を GPU 化（backend="gpu"）— 交差点はあるが小窓では負け
+
+P3.4 で「solve の GPU 化は割に合わない・assemble が支配的」と分かったので、今回は **gather+assemble を丸ごと device 化**。cupy で bilinear サンプリング・scan ごとの Jacobian 縮約・`H_xphi`/`b_phi` の scatter・疎 `H_phiphi` の COO 構築、Schur solve も device（cuSOLVER）。
+
+- **数値一致を検証**: backend="schur" と bit 単位で一致（cost ~1e-10, pose ~1e-15, phi 完全一致）。
+- **正直なベンチ**（GPU）: 大窓では GPU が勝つ（~40k 窓点で 1.74x、~20k で互角）。だが engine が実際に使う固定ラグ小窓（K~10, ~4–5k 点）では **GPU が ~2x 遅い**。
+- **プロファイル内訳（4385 点, V=1068, /iter）**: bilinear 1.73ms / unique+searchsorted 0.37ms / scatter(16×`cp.add.at`) 1.57ms / COO 0.92ms / **splu solve 10.1ms**。→ assemble ではなく **cuSOLVER の疎 LU 分解が壁**（P3.4 と同根）。fused カーネルで scatter を潰しても solve 律速は変わらない。
+- 真の梃子は「より速い疎分解」or「分解の回避」（H_phiphi は強 SDF prior で対角優勢 → CG/Jacobi 反復で splu を置換できる可能性）。opt-in (`backend="gpu"`) として温存。SDF 平滑化項は GPU パス未対応（明示的に NotImplementedError）。
+
+### P-map 所見 (2026-05-25): 永続グローバル TSDF マップ（ループ閉じ込み整合）
+
+トラッカは意図的に**毎スキャン作り直す鮮明なローカルサブマップ**で走る（永続蓄積はロボット移動でボケて lag を生む）。そのため全走行の一貫マップが今まで存在しなかった。`GlobalTsdfMap` がその欠落物 — 受理スキャンを現 pose で畳み込む大きな永続 TSDF を**トラッキングとは分離**して保持（マップ構築がトラッキングに feedback しない）。
+
+- ループ閉じ込みで軌跡が補正されたら、**補正後 pose から全スキャンを再畳み込み**（`rebuild`）。online の逐次畳み込みだけだと閉じ込み前のドリフトが焼き込まれる。
+- `to_occupancy_u8`: TSDF を ROS 流の 8bit occupancy（254=free / 0=occupied / 205=unknown）に描画。CLI が `global_map.pgm/yaml` を出力（`build_global_map`）。`finalize_global_map` は最終最適化 pose から再構築。
+
+### P-eval 所見 (2026-05-25): 大規模 ATE（600 scan × 4 変種）
+
+P3.3 の 300 scan を倍に伸ばし、joint と marginalization の利得を大規模で検証。Cartographer backpack_2d を 600 scan replay → 疑似GT（5581点）へ時刻対応づけ、Umeyama 整列 ATE（`tools/eval_ate_scan_ba.py --max-scans 600 --variants pose_only marg joint joint_marg`、558 マッチ）:
+
+| variant | rmse [m] | mean | p50 | p90 | max | ms/scan |
+|---------|----------|------|-----|-----|-----|---------|
+| pose_only | 0.184 | 0.165 | 0.147 | 0.246 | 0.640 | 965 |
+| marg | 0.198 | 0.176 | 0.160 | 0.253 | 0.705 | 907 |
+| **joint** | **0.139** | 0.121 | 0.107 | 0.237 | **0.318** | 1133 |
+| joint_marg | 0.148 | 0.130 | 0.117 | 0.251 | 0.333 | 1104 |
+
+- **joint pose+SDF BA は大規模でも頑健に効く**: pose_only 比で **rmse −24%**（0.184→0.139）、**最悪誤差を約半分**（0.640→0.318）。300 scan の −28% / 最悪 1/3 と整合し、ウィンドウ内で SDF を同時 refine して registration を鋭くする効果がスケールしても持続することを確認。
+- **厳密 marginalization は実走行で利得なし（正直な負の結果）**: pose_only→marg は rmse +8%（0.184→0.198）・最悪 +10%、joint→joint_marg も rmse +6%（0.139→0.148）と、両軸でわずかに**悪化**。FEJ により理論的には情報整合性で優れるはずだが、この実バッグでは (a) 既存の強 anchor ヒューリスティックが既にほぼ最適、(b) FEJ がドリフト走行の初期線形化誤差を prior に焼き込んで硬直、(c) 固定ラグ窓が短く整合性の利得が小さい一方 FEJ の硬さが勝つ、が重なったと解釈。**安価な anchor が実データでは exact marginalization に勝つ** — 実装は正しい（テストで bit 一致を証明済み）が、この問題設定では使う動機が薄いという知見。
+- **per-scan コストは走行長でほぼ一定**: 600 scan で 907〜1133 ms/scan と、120 scan スモーク（855 ms/scan）から約 +13% に留まる。ループ閉じのポーズグラフ最適化（O(n)）と履歴増大による緩やかな成長で、破綻的な増加はない。joint は SDF 同時最適化分で pose_only 比 +17% 程度の上乗せ。
 
 ### P2 ベンチ所見 (2026-05-24, GPU, cupy 14.1, CUDA 12.0)
 
