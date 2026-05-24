@@ -75,7 +75,7 @@ def _engine(loop: bool) -> ScanBaEngine:
         loop_max_candidates=2,
         loop_submap_window=6,
         loop_accept_inlier_ratio=0.4,
-        loop_accept_cost=0.2,
+        loop_accept_rms_m=0.3,
         loop_max_correction_m=2.0,
     )
     return ScanBaEngine(cfg=cfg)

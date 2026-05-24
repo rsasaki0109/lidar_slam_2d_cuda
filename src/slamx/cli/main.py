@@ -78,8 +78,8 @@ def _scan_ba_engine_from_config(cfg: dict[str, Any], telemetry: JsonlTelemetry |
         loop_min_gap=int(sb.get("loop_min_gap", 30)),
         loop_max_candidates=int(sb.get("loop_max_candidates", 2)),
         loop_submap_window=int(sb.get("loop_submap_window", 10)),
-        loop_accept_inlier_ratio=float(sb.get("loop_accept_inlier_ratio", 0.55)),
-        loop_accept_cost=float(sb.get("loop_accept_cost", 0.05)),
+        loop_accept_inlier_ratio=float(sb.get("loop_accept_inlier_ratio", 0.4)),
+        loop_accept_rms_m=float(sb.get("loop_accept_rms_m", 0.3)),
         loop_max_correction_m=float(sb.get("loop_max_correction_m", 1.5)),
     )
     return ScanBaEngine(cfg=engine_cfg, telemetry=telemetry)

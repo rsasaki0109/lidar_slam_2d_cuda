@@ -49,8 +49,10 @@ class ScanBaEngineConfig:
     loop_min_gap: int = 30
     loop_max_candidates: int = 2
     loop_submap_window: int = 10  # scans around a candidate used to build its verify TSDF
-    loop_accept_inlier_ratio: float = 0.55
-    loop_accept_cost: float = 0.05
+    loop_accept_inlier_ratio: float = 0.4
+    # RMS residual of the verification alignment (scale-invariant: sqrt(2*cost/inliers)).
+    # A total-cost threshold would scale with point count and never fire on real scans.
+    loop_accept_rms_m: float = 0.3
     loop_max_correction_m: float = 1.5  # reject verify poses too far from odom prediction
 
 
@@ -243,11 +245,11 @@ class ScanBaEngine:
                 huber_delta_m=self.cfg.huber_delta_m,
             )
             inl_ratio = (res.num_inliers / n_pts) if n_pts else 0.0
+            rms = float(np.sqrt(2.0 * res.final_cost / max(1, res.num_inliers)))
             corr = float(np.hypot(res.pose.x - cur.x, res.pose.y - cur.y))
             if (
-                res.converged
-                and inl_ratio >= self.cfg.loop_accept_inlier_ratio
-                and res.final_cost <= self.cfg.loop_accept_cost
+                inl_ratio >= self.cfg.loop_accept_inlier_ratio
+                and rms <= self.cfg.loop_accept_rms_m
                 and corr <= self.cfg.loop_max_correction_m
             ):
                 rel = self.graph.poses[j].inverse().compose(res.pose)
@@ -257,7 +259,7 @@ class ScanBaEngine:
                 if self.telemetry:
                     self.telemetry.emit(
                         "loop_closure_accepted",
-                        {"node": node, "i": j, "inlier_ratio": inl_ratio, "cost": res.final_cost},
+                        {"node": node, "i": j, "inlier_ratio": inl_ratio, "rms": rms},
                     )
 
         if added:
