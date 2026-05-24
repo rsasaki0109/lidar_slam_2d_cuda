@@ -310,6 +310,7 @@ def optimize_window_joint(
     converged = False
     cost = float("inf")
     n_active = 0
+    inliers: list[int] = [0] * K
 
     for it in range(max_iters):
         iterations = it + 1
@@ -372,5 +373,5 @@ def optimize_window_joint(
         final_cost=cost,
         converged=converged,
         num_active_voxels=n_active,
-        diagnostics={"lm_lambda_final": lam},
+        diagnostics={"lm_lambda_final": lam, "inliers_per_scan": list(inliers)},
     )

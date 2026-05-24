@@ -82,6 +82,9 @@ def _scan_ba_engine_from_config(cfg: dict[str, Any], telemetry: JsonlTelemetry |
         loop_accept_rms_m=float(sb.get("loop_accept_rms_m", 0.3)),
         loop_max_correction_m=float(sb.get("loop_max_correction_m", 1.5)),
         use_cuda=bool(sb.get("use_cuda", False)),
+        use_joint=bool(sb.get("use_joint", False)),
+        joint_sdf_prior_info=float(sb.get("joint_sdf_prior_info", 10.0)),
+        joint_sdf_smooth_info=float(sb.get("joint_sdf_smooth_info", 0.0)),
     )
     return ScanBaEngine(cfg=engine_cfg, telemetry=telemetry)
 

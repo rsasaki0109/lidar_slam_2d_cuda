@@ -57,6 +57,13 @@ class ScanBaEngineConfig:
     # Run the fixed-lag window LM solve on the GPU (fused CUDA kernel, P2.5/P2.9).
     # Numerically identical to the CPU path; falls back to CPU if cupy/CUDA is absent.
     use_cuda: bool = False
+    # Joint pose+SDF bundle adjustment (P3): the window solve also refines the local
+    # map's SDF voxels, not just the K poses. CPU-only for now (takes precedence over
+    # use_cuda). The refined map is transient -- the local map is rebuilt from poses
+    # each scan -- so this mainly sharpens the map the current pose is registered to.
+    use_joint: bool = False
+    joint_sdf_prior_info: float = 10.0
+    joint_sdf_smooth_info: float = 0.0
 
 
 @dataclass
@@ -81,10 +88,13 @@ class ScanBaEngine:
         self.graph = PoseGraph(cfg=PoseGraphConfig(max_iterations=50))
         self._tsdf = Tsdf2D.zeros(self.cfg.tsdf)
         self._window_solver = self._resolve_window_solver()
+        # Joint mode runs the CPU joint solver and refines the SDF in-place; it is
+        # incompatible with the device-resident GPU map, so it forces the CPU path.
+        self._joint_active = self.cfg.use_joint
         # Device-resident local map: when the GPU path is active, keep phi/weight on
         # the device across the per-scan rebuild + window solve so there is no host
         # upload each scan. _scans_dev mirrors _scans as (N,2) float64 device arrays.
-        self._cuda_active = self._window_solver is not optimize_window
+        self._cuda_active = (not self._joint_active) and self._window_solver is not optimize_window
         self._scans_dev: list = []
         if self._cuda_active:
             from slamx.core.scan_ba import cuda
@@ -95,8 +105,19 @@ class ScanBaEngine:
             self._weight_d = self._cp.zeros_like(self._phi_d)
 
     def _resolve_window_solver(self):
-        """Pick the window LM backend: GPU fused kernel when requested+available,
-        else the CPU reference. Both are numerically identical."""
+        """Pick the window LM backend. Joint pose+SDF BA (CPU) takes precedence; then
+        the GPU fused kernel when requested+available; else the CPU pose-only reference.
+        The GPU and CPU pose-only paths are numerically identical."""
+        if self.cfg.use_joint:
+            from functools import partial
+
+            from slamx.core.scan_ba.joint import optimize_window_joint
+
+            return partial(
+                optimize_window_joint,
+                sdf_prior_info=self.cfg.joint_sdf_prior_info,
+                sdf_smooth_info=self.cfg.joint_sdf_smooth_info,
+            )
         if not self.cfg.use_cuda:
             return optimize_window
         try:
