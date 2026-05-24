@@ -46,6 +46,15 @@ def _scan_ba_engine_from_config(cfg: dict[str, Any], telemetry: JsonlTelemetry |
     preprocess = slam.get("preprocess", {})
     sb = slam.get("scan_ba", {}) or {}
     tsdf = sb.get("tsdf", {}) or {}
+    gm = sb.get("global_tsdf", {}) or {}
+    global_tsdf = Tsdf2DConfig(
+        resolution_m=float(gm.get("resolution_m", 0.05)),
+        origin_x_m=float(gm.get("origin_x_m", -30.0)),
+        origin_y_m=float(gm.get("origin_y_m", -30.0)),
+        size_x_m=float(gm.get("size_x_m", 60.0)),
+        size_y_m=float(gm.get("size_y_m", 60.0)),
+        truncation_m=float(gm.get("truncation_m", 0.4)),
+    )
 
     engine_cfg = ScanBaEngineConfig(
         preprocess=PreprocessConfig(
@@ -86,6 +95,8 @@ def _scan_ba_engine_from_config(cfg: dict[str, Any], telemetry: JsonlTelemetry |
         joint_sdf_prior_info=float(sb.get("joint_sdf_prior_info", 10.0)),
         joint_sdf_smooth_info=float(sb.get("joint_sdf_smooth_info", 0.0)),
         use_marginalization=bool(sb.get("use_marginalization", False)),
+        build_global_map=bool(sb.get("build_global_map", False)),
+        global_tsdf=global_tsdf,
     )
     return ScanBaEngine(cfg=engine_cfg, telemetry=telemetry)
 
@@ -361,6 +372,19 @@ def replay(
             origin=[ogm.origin_x, ogm.origin_y, 0.0],
             extra={"slamx": {"map_type": "occupancy_grid", "schema_version": 1}},
         )
+    gmap = getattr(eng, "global_map", None)
+    if gmap is not None:
+        eng.finalize_global_map()  # rebuild from the final optimized poses
+        gpgm = out / "global_map.pgm"
+        save_pgm(gpgm, gmap.to_occupancy_u8())
+        save_occupancy_yaml(
+            out / "global_map.yaml",
+            image=str(gpgm.name),
+            resolution=gmap.cfg.resolution_m,
+            origin=[gmap.cfg.origin_x_m, gmap.cfg.origin_y_m, 0.0],
+            extra={"slamx": {"map_type": "tsdf_occupancy", "schema_version": 1}},
+        )
+        typer.echo(f"Wrote persistent global TSDF map {gpgm}")
     typer.echo(f"Wrote {out / 'trajectory.json'} and telemetry.")
 
 
