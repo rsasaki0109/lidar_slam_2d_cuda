@@ -182,6 +182,94 @@ def test_engine_joint_mode_tracks_trajectory():
     assert out[-1].x > out[0].x + 0.5
 
 
+def _marg_engine(use_joint: bool = False) -> ScanBaEngine:
+    cfg = ScanBaEngineConfig(
+        tsdf=Tsdf2DConfig(
+            resolution_m=0.05,
+            origin_x_m=-5.0,
+            origin_y_m=-5.0,
+            size_x_m=14.0,
+            size_y_m=14.0,
+            truncation_m=0.5,
+        ),
+        window_size=6,
+        seed_scans=3,
+        prediction_mode="constant_velocity",
+        use_marginalization=True,
+        use_joint=use_joint,
+    )
+    return ScanBaEngine(cfg=cfg)
+
+
+def test_engine_marginalization_tracks_and_builds_prior():
+    """With exact marginalization on, the engine must (a) still track the trajectory
+    and (b) actually build a MarginalizationPrior once the window starts dropping poses
+    (no heuristic anchor on the oldest in-window pose any more)."""
+    gt = [Pose2(0.15 * i, 0.05 * i, 0.01 * i) for i in range(12)]
+    eng = _marg_engine()
+    assert eng._marg_active
+    out = [eng.handle_scan(_l_room_laserscan(p)) for p in gt]
+
+    # the window (size 6) slides after ~7 scans -> a prior must have been produced
+    assert eng._marg_prior is not None
+    assert eng._marg_idx > 0
+    # 3x3 information is symmetric PD-ish (positive diagonal)
+    assert np.all(np.diag(eng._marg_prior.Lambda) > 0.0)
+    final_err = math.hypot(out[-1].x - gt[-1].x, out[-1].y - gt[-1].y)
+    assert final_err < 0.15, f"final drift {final_err:.4f}m"
+    assert out[-1].x > out[0].x + 0.7
+
+
+def test_engine_marginalization_matches_anchor_closely():
+    """Exact marginalization replaces the strong anchor but should give a trajectory
+    very close to it on a clean synthetic run (the anchor is already a tight pin)."""
+    gt = [Pose2(0.15 * i, 0.05 * i, 0.01 * i) for i in range(12)]
+    a = ScanBaEngine(cfg=ScanBaEngineConfig(
+        tsdf=Tsdf2DConfig(resolution_m=0.05, origin_x_m=-5.0, origin_y_m=-5.0,
+                          size_x_m=14.0, size_y_m=14.0, truncation_m=0.5),
+        window_size=6, seed_scans=3, prediction_mode="constant_velocity",
+    ))
+    out_anchor = [a.handle_scan(_l_room_laserscan(p)) for p in gt]
+    m = _marg_engine()
+    out_marg = [m.handle_scan(_l_room_laserscan(p)) for p in gt]
+    dev = max(math.hypot(x.x - y.x, x.y - y.y) for x, y in zip(out_anchor, out_marg))
+    assert dev < 0.1, f"marginalization vs anchor deviation {dev:.4f}m too large"
+
+
+def test_engine_marginalization_with_joint():
+    """Marginalization must also work through the joint pose+SDF backend (the prior
+    is threaded into the joint solver's normal equations)."""
+    gt = [Pose2(0.15 * i, 0.05 * i, 0.01 * i) for i in range(10)]
+    eng = _marg_engine(use_joint=True)
+    assert eng._marg_active and eng._joint_active
+    out = [eng.handle_scan(_l_room_laserscan(p)) for p in gt]
+    assert eng._marg_prior is not None
+    final_err = math.hypot(out[-1].x - gt[-1].x, out[-1].y - gt[-1].y)
+    assert final_err < 0.18, f"final drift {final_err:.4f}m"
+
+
+def test_engine_marginalization_disabled_on_cuda():
+    """The GPU map path has no host-resident TSDF to linearize the dropped pose, so
+    marginalization must stay off even when requested alongside use_cuda."""
+    cfg = ScanBaEngineConfig(window_size=6, use_marginalization=True, use_cuda=True)
+    eng = ScanBaEngine(cfg=cfg)
+    # use_cuda only forces the GPU path if cupy/CUDA is present; either way, marg must
+    # never be active while the cuda path is active.
+    assert not (eng._cuda_active and eng._marg_active)
+
+
+def test_engine_marginalization_dispatch_from_config():
+    cfg = {
+        "slam": {
+            "frontend": "scan_ba",
+            "scan_ba": {"window_size": 8, "use_marginalization": True},
+        }
+    }
+    eng = _engine_from_config(cfg, None)
+    assert eng.cfg.use_marginalization is True
+    assert eng._marg_active
+
+
 def test_engine_joint_dispatch_from_config():
     cfg = {
         "slam": {

@@ -236,6 +236,11 @@ def optimize_window_joint(
             Hxx[0:3, 0:3] += np.diag(Wd)
             bx[0:3] += Wd * r
             cost += 0.5 * float(np.sum(Wd * r * r))
+        if state.marg_prior is not None:
+            Hm, bm, cm = state.marg_prior.blocks(cur_poses[0])
+            Hxx[0:3, 0:3] += Hm
+            bx[0:3] += bm
+            cost += cm
         if active_list:
             av = np.array(active_list, dtype=np.int64)
             rp = tsdf.phi.ravel()[av] - phi0_full.ravel()[av]
@@ -332,6 +337,8 @@ def optimize_window_joint(
                 cur_poses[0].theta - state.anchor.pose.theta,
             ])
             c += 0.5 * float(np.sum(Wd * r * r))
+        if state.marg_prior is not None:
+            c += state.marg_prior.blocks(cur_poses[0])[2]
         av = np.where(phi0_full.ravel() != tsdf.phi.ravel())[0]
         if av.size:
             rp = tsdf.phi.ravel()[av] - phi0_full.ravel()[av]
@@ -402,6 +409,7 @@ def optimize_window_joint(
         scans=state.scans,
         motion_priors=list(state.motion_priors),
         anchor=state.anchor,
+        marg_prior=state.marg_prior,
     )
     return JointWindowResult(
         state=out_state,

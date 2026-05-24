@@ -85,6 +85,7 @@ def _scan_ba_engine_from_config(cfg: dict[str, Any], telemetry: JsonlTelemetry |
         use_joint=bool(sb.get("use_joint", False)),
         joint_sdf_prior_info=float(sb.get("joint_sdf_prior_info", 10.0)),
         joint_sdf_smooth_info=float(sb.get("joint_sdf_smooth_info", 0.0)),
+        use_marginalization=bool(sb.get("use_marginalization", False)),
     )
     return ScanBaEngine(cfg=engine_cfg, telemetry=telemetry)
 

@@ -64,6 +64,13 @@ class ScanBaEngineConfig:
     use_joint: bool = False
     joint_sdf_prior_info: float = 10.0
     joint_sdf_smooth_info: float = 0.0
+    # Exact sliding-window marginalization (P4.1): when a pose leaves the fixed-lag
+    # window, Schur-eliminate it into a MarginalizationPrior on the new oldest pose
+    # instead of pinning that pose with a heuristic strong anchor. Preserves the
+    # information the dropped pose carried (first-estimate Jacobians). Requires the
+    # CPU or joint path -- the device-resident GPU map is not host-resident for the
+    # linearization, so marginalization is disabled when use_cuda forces the GPU path.
+    use_marginalization: bool = False
 
 
 @dataclass
@@ -95,6 +102,13 @@ class ScanBaEngine:
         # the device across the per-scan rebuild + window solve so there is no host
         # upload each scan. _scans_dev mirrors _scans as (N,2) float64 device arrays.
         self._cuda_active = (not self._joint_active) and self._window_solver is not optimize_window
+        # Exact marginalization (P4.1): a running MarginalizationPrior on the current
+        # oldest in-window pose, with the global pose index it linearizes. Recursively
+        # updated each time the window drops a pose. Needs a host-resident TSDF to
+        # linearize the dropped pose's data term, so it is off on the GPU map path.
+        self._marg_active = self.cfg.use_marginalization and not self._cuda_active
+        self._marg_prior = None
+        self._marg_idx = -1
         self._scans_dev: list = []
         if self._cuda_active:
             from slamx.core.scan_ba import cuda
@@ -233,8 +247,10 @@ class ScanBaEngine:
             )
             pose = self._gate(res.pose, prediction, res.num_inliers, n_pts)
             score = res.final_cost
+            self._pending_marg = None
         else:
             k_hist = min(self.cfg.window_size - 1, n_hist)
+            oldest_idx = n_hist - k_hist
             hist_poses = self.graph.poses[-k_hist:]
             hist_scans = self._scans[-k_hist:]
             window_poses = list(hist_poses) + [prediction]
@@ -249,7 +265,14 @@ class ScanBaEngine:
                 )
                 for i in range(len(window_poses) - 1)
             ]
-            anchor = AnchorPrior(
+            # Pin pose 0 of the window. With marginalization on and a prior already
+            # built for this oldest pose, use that exact prior (no anchor); otherwise
+            # fall back to the heuristic strong anchor (also used during window growth
+            # before the first pose is ever dropped).
+            use_marg = (
+                self._marg_active and self._marg_prior is not None and self._marg_idx == oldest_idx
+            )
+            anchor = None if use_marg else AnchorPrior(
                 pose=window_poses[0],
                 info_xy=self.cfg.anchor_info_xy,
                 info_theta=self.cfg.anchor_info_theta,
@@ -259,6 +282,7 @@ class ScanBaEngine:
                 scans=window_scans,
                 motion_priors=motion_priors,
                 anchor=anchor,
+                marg_prior=self._marg_prior if use_marg else None,
             )
             if self._cuda_active:
                 res = self._window_solver(
@@ -283,6 +307,13 @@ class ScanBaEngine:
                 self.graph.poses[-k_hist:] = res.state.poses[:-1]
             pose = gated
             score = res.final_cost
+            # remember what is needed to marginalize this window's oldest pose once the
+            # new pose is committed (computed in the common tail below)
+            self._pending_marg = (
+                (oldest_idx, motion_priors[0], anchor, self._marg_prior if use_marg else None)
+                if self._marg_active
+                else None
+            )
 
         prev = self.graph.poses[-1]
         rel = prev.inverse().compose(pose)
@@ -291,6 +322,8 @@ class ScanBaEngine:
         self.graph.add_edge(Edge(i=node - 1, j=node, rel=rel))
         self._store_scan(pts)
         self._stamps.append(scan.stamp_ns)
+        if self._marg_active:
+            self._update_marginalization()
         self._emit(node, pose, score=score)
 
         if (
@@ -300,6 +333,37 @@ class ScanBaEngine:
             self._try_loop_closure(node, pts)
 
         return self.graph.poses[node]
+
+    def _update_marginalization(self) -> None:
+        """Once the new pose is committed, Schur-eliminate the pose that just left the
+        window into a MarginalizationPrior on the new oldest pose (P4.1).
+
+        Only fires when the window actually slid (a pose dropped); during window growth
+        the oldest pose stays put and the prior is left untouched. The dropped pose's
+        data term is linearized against the current local map (first-estimate Jacobians);
+        the prior recurses on whatever pinned pose 0 this step (anchor or prior marginal).
+        """
+        pending = getattr(self, "_pending_marg", None)
+        if pending is None:
+            return
+        oldest_idx, motion_prior0, anchor_used, prev_marg_used = pending
+        n = len(self.graph.poses)
+        next_k = min(self.cfg.window_size - 1, n)
+        next_oldest = n - next_k
+        if next_oldest != oldest_idx + 1:
+            return  # window still growing -- nothing dropped yet
+        from slamx.core.scan_ba.marginalize import marginalize_oldest_pose
+
+        self._marg_prior = marginalize_oldest_pose(
+            tsdf=self._tsdf,
+            poses=[self.graph.poses[oldest_idx], self.graph.poses[oldest_idx + 1]],
+            scans=[self._scans[oldest_idx], self._scans[oldest_idx + 1]],
+            motion_prior=motion_prior0,
+            huber_delta_m=self.cfg.huber_delta_m,
+            anchor=anchor_used,
+            prev_marg=prev_marg_used,
+        )
+        self._marg_idx = oldest_idx + 1
 
     def _try_loop_closure(self, node: int, pts: np.ndarray) -> None:
         """Detect distance-based loops against past nodes, verify by TSDF
