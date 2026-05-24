@@ -75,6 +75,42 @@ def _solve_step_gpu(Hxx_lm, Hxp, bx, rhs, pp_r, pp_c, pp_v, V, diagp, K):
     return cp.asnumpy(cp.concatenate([dxx, dxp]))
 
 
+def _pcg_spd_multi(cp, A, B, tol=1e-12, max_iter=2000):
+    """Jacobi-preconditioned CG solving A X = B for all columns of B at once (A SPD).
+
+    The SDF block H_phiphi is symmetric positive-definite and, under a strong SDF
+    prior (its diagonal is `sdf_prior_info + lambda`), strongly diagonally dominant --
+    so a diagonally-preconditioned CG converges in a handful of iterations and replaces
+    the cuSOLVER sparse-LU factorization (the profiled wall of the joint GPU solve)
+    with cheap cuSPARSE spmm + reductions. Each RHS column runs an independent CG,
+    vectorized over columns; we iterate until every column's relative residual < tol.
+    A is a cupyx CSR matrix (V,V); B is (V, m). Returns X (V, m)."""
+    diag = A.diagonal()
+    diag = cp.where(diag == 0, 1.0, diag)
+    Minv = (1.0 / diag)[:, None]
+    X = cp.zeros_like(B)
+    R = B.copy()  # B - A@0
+    bnorm = cp.linalg.norm(B, axis=0)
+    bnorm = cp.where(bnorm == 0, 1.0, bnorm)
+    Z = Minv * R
+    P = Z.copy()
+    rz = cp.sum(R * Z, axis=0)
+    for _ in range(max_iter):
+        AP = A @ P
+        pAp = cp.sum(P * AP, axis=0)
+        alpha = (rz / cp.where(pAp == 0, 1.0, pAp))[None, :]
+        X = X + alpha * P
+        R = R - alpha * AP
+        if bool(cp.all(cp.linalg.norm(R, axis=0) / bnorm < tol)):
+            break
+        Z = Minv * R
+        rz_new = cp.sum(R * Z, axis=0)
+        beta = (rz_new / cp.where(rz == 0, 1.0, rz))[None, :]
+        P = Z + beta * P
+        rz = rz_new
+    return X
+
+
 def _bilinear_terms_gpu(cp, phi_d, wt_d, cfg, pts_w):
     """Device port of `_bilinear_terms`. phi_d/wt_d are float32 (matching the host TSDF
     store so r is computed from the same float32 voxel values); returns device arrays
@@ -184,6 +220,7 @@ def _pose_priors_host(state: WindowState, cur_poses, K: int):
 def _optimize_window_joint_gpu(
     *, tsdf, state, max_iters, huber_delta_m, sdf_prior_info,
     converge_dx_m, converge_dtheta_rad, lm_lambda_init, lm_lambda_min, lm_lambda_max,
+    gpu_solver="pcg",
 ) -> JointWindowResult:
     """Fully on-device joint pose+SDF window solve (P3.5).
 
@@ -339,10 +376,16 @@ def _optimize_window_joint_gpu(
                 dx = cp.linalg.solve(Hxx_lm, -bx)
             else:
                 diagp = sdf_prior_info + lam
-                Hpp = csp.coo_matrix((pp_v, (pp_r, pp_c)), shape=(n_active, n_active)).tocsc()
-                Hpp = Hpp + diagp * csp.identity(n_active, format="csc")
                 rhs = cp.concatenate([Hxp.T, bp[:, None]], axis=1)
-                Y = cspl.splu(Hpp).solve(rhs)
+                if gpu_solver == "pcg":
+                    # matrix-free-ish: cuSPARSE spmm + Jacobi PCG, no LU factorization
+                    Hpp = csp.coo_matrix((pp_v, (pp_r, pp_c)), shape=(n_active, n_active)).tocsr()
+                    Hpp = Hpp + diagp * csp.identity(n_active, format="csr")
+                    Y = _pcg_spd_multi(cp, Hpp, rhs)
+                else:
+                    Hpp = csp.coo_matrix((pp_v, (pp_r, pp_c)), shape=(n_active, n_active)).tocsc()
+                    Hpp = Hpp + diagp * csp.identity(n_active, format="csc")
+                    Y = cspl.splu(Hpp).solve(rhs)
                 YH, Yb = Y[:, : 3 * K], Y[:, 3 * K]
                 S = Hxx_lm - Hxp @ YH
                 dxx = cp.linalg.solve(S, -(bx - Hxp @ Yb))
@@ -408,13 +451,17 @@ def optimize_window_joint(
     lm_lambda_min: float = 1e-8,
     lm_lambda_max: float = 1e6,
     backend: str = "schur",
+    gpu_solver: str = "pcg",
 ) -> JointWindowResult:
     """backend="schur" (default) eliminates the SDF block via a sparse Schur complement
     (scales to large active-voxel counts); "dense" builds the full (3K+V) system;
     "schur_gpu" runs the sparse Schur factorization on the GPU (cupyx splu / cuSOLVER).
     All three give the same Gauss-Newton/LM step. backend="gpu" additionally moves the
     gather+assemble onto the device (the actual bottleneck); it does not support the
-    SDF smoothness term."""
+    SDF smoothness term. For backend="gpu", gpu_solver selects the SDF-block solve:
+    "pcg" (default) uses Jacobi-preconditioned CG (cuSPARSE spmm, no factorization --
+    H_phiphi is diagonally dominant under the SDF prior); "splu" keeps the cuSOLVER
+    sparse-LU factorization for comparison."""
     if backend == "gpu":
         if sdf_smooth_info > 0.0:
             raise NotImplementedError("backend='gpu' does not support sdf_smooth_info > 0")
@@ -423,6 +470,7 @@ def optimize_window_joint(
             sdf_prior_info=sdf_prior_info, converge_dx_m=converge_dx_m,
             converge_dtheta_rad=converge_dtheta_rad, lm_lambda_init=lm_lambda_init,
             lm_lambda_min=lm_lambda_min, lm_lambda_max=lm_lambda_max,
+            gpu_solver=gpu_solver,
         )
     K = state.k
     phi0_full = tsdf.phi.copy()  # fold-time values; the SDF prior pins phi here
