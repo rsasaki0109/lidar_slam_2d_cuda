@@ -117,6 +117,10 @@ kernel 群:
 - **~220x 高速**で同一解。dense は (3K+V)³ ∝ V³ だが Schur は疎 H_φφ の因子分解 + 3K×3K の小 solve なので V に対しスケール。joint BA が実用ウィンドウサイズで回る。
 - 次 (**P3.1 GPU / P3.2**): Schur の H_φφ 因子分解を GPU (cuSOLVER sparse / 反復法) に、SDF 平滑化項追加、engine への joint backend 配線。
 
+### P3.2 所見 (2026-05-25): SDF 平滑化項
+
+`optimize_window_joint(sdf_smooth_info=λ)` (既定 0.0=off)。隣接 active ボクセル間 (4 近傍の右/下) に残差 `r = φ_u − φ_v` を加える Laplacian 正則化。H_φφ に対角 +λ / 非対角 −λ を足す疎構造なので、P3.1 の Schur 経路にそのまま COO 追加で乗る。schur と dense は平滑化 ON でも完全一致 (φ 差 0.0)。L-room 劣化マップで refine 後 φ の総変動 (roughness): no-smooth 950.3 → λ=2.0 で 923.4 と低下。観測の薄い領域の SDF を整える。accept/reject 用 `total_cost` にも平滑化項を含めて整合。
+
 ### P2 ベンチ所見 (2026-05-24, GPU, cupy 14.1, CUDA 12.0)
 
 per-scan data-block (sample+Jacobian+JtWJ/JtWr) を cupy で実装、TSDF 常駐・30反復平均:

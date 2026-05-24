@@ -113,6 +113,51 @@ def test_joint_schur_matches_dense():
     np.testing.assert_allclose(ts.phi, td.phi, rtol=0, atol=1e-6)
 
 
+def _tv(t: Tsdf2D) -> float:
+    p = t.phi
+    mm = t.weight > 0
+    dx = np.abs(np.diff(p, axis=1))
+    dy = np.abs(np.diff(p, axis=0))
+    return float(dx[mm[:, 1:] & mm[:, :-1]].sum() + dy[mm[1:, :] & mm[:-1, :]].sum())
+
+
+def test_joint_smoothness_term():
+    """The SDF smoothness regulariser (a) keeps schur == dense and (b) reduces the
+    refined map's roughness (total variation) vs no smoothing."""
+    cfg = _cfg()
+    gt = _gt()[:2]
+    scans = [_raycast_scan(p, n_beams=80) for p in gt]
+    base = _clean_map(cfg, gt, scans)
+    rng = np.random.default_rng(2)
+    m = base.weight > 0
+    noise = rng.normal(0.0, 0.06, size=int(m.sum())).astype(np.float32)
+
+    def state():
+        mps = [
+            MotionPrior(
+                delta_x=gt[1].x - gt[0].x, delta_y=gt[1].y - gt[0].y, delta_theta=gt[1].theta - gt[0].theta,
+                info_xy=3.0, info_theta=3.0,
+            )
+        ]
+        return WindowState(poses=list(gt), scans=scans, motion_priors=mps, anchor=AnchorPrior(pose=gt[0]))
+
+    def fresh():
+        t = Tsdf2D(cfg=cfg, phi=base.phi.copy(), weight=base.weight.copy())
+        t.phi[m] += noise
+        return t
+
+    ts = fresh()
+    rs = optimize_window_joint(tsdf=ts, state=state(), max_iters=12, huber_delta_m=0.2, sdf_smooth_info=2.0, backend="schur")
+    td = fresh()
+    rd = optimize_window_joint(tsdf=td, state=state(), max_iters=12, huber_delta_m=0.2, sdf_smooth_info=2.0, backend="dense")
+    assert abs(rs.final_cost - rd.final_cost) < 1e-9
+    np.testing.assert_allclose(ts.phi, td.phi, rtol=0, atol=1e-6)
+
+    tn = fresh()
+    optimize_window_joint(tsdf=tn, state=state(), max_iters=12, huber_delta_m=0.2, sdf_smooth_info=0.0)
+    assert _tv(ts) < _tv(tn), "smoothing should reduce map total variation"
+
+
 if __name__ == "__main__":
     import pytest
 
