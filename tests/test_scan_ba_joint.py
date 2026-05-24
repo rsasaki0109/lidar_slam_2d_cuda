@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from slamx.core.scan_ba.joint import optimize_window_joint
 from slamx.core.scan_ba.tsdf import Tsdf2D, Tsdf2DConfig
@@ -158,7 +159,55 @@ def test_joint_smoothness_term():
     assert _tv(ts) < _tv(tn), "smoothing should reduce map total variation"
 
 
-if __name__ == "__main__":
-    import pytest
+def _gpu_sparse_works() -> bool:
+    """True only if a tiny cupyx sparse splu solve actually runs (needs a CUDA device
+    and JIT headers via CUDA_PATH); otherwise the GPU Schur backend is skipped."""
+    try:
+        import cupy as cp
+        import cupyx.scipy.sparse as csp
+        import cupyx.scipy.sparse.linalg as cspl
 
+        A = csp.identity(4, format="csc") * 2.0
+        x = cspl.splu(A).solve(cp.ones((4, 1)))
+        return bool(cp.allclose(x, 0.5))
+    except Exception:
+        return False
+
+
+@pytest.mark.skipif(not _gpu_sparse_works(), reason="no CUDA device / cupy sparse / CUDA headers")
+def test_joint_schur_gpu_matches_cpu():
+    """The GPU Schur backend (cupyx splu / cuSOLVER) gives the same step and refined
+    map as the CPU sparse Schur path."""
+    cfg = _cfg()
+    gt = _gt()[:2]
+    scans = [_raycast_scan(p, n_beams=80) for p in gt]
+    base = _clean_map(cfg, gt, scans)
+    rng = np.random.default_rng(3)
+    m = base.weight > 0
+    noise = rng.normal(0.0, 0.05, size=int(m.sum())).astype(np.float32)
+
+    def state():
+        mps = [
+            MotionPrior(
+                delta_x=gt[1].x - gt[0].x, delta_y=gt[1].y - gt[0].y, delta_theta=gt[1].theta - gt[0].theta,
+                info_xy=3.0, info_theta=3.0,
+            )
+        ]
+        return WindowState(poses=list(gt), scans=scans, motion_priors=mps, anchor=AnchorPrior(pose=gt[0]))
+
+    tc = Tsdf2D(cfg=cfg, phi=base.phi.copy(), weight=base.weight.copy())
+    tc.phi[m] += noise
+    rc = optimize_window_joint(tsdf=tc, state=state(), max_iters=10, huber_delta_m=0.2, backend="schur")
+
+    tg = Tsdf2D(cfg=cfg, phi=base.phi.copy(), weight=base.weight.copy())
+    tg.phi[m] += noise
+    rg = optimize_window_joint(tsdf=tg, state=state(), max_iters=10, huber_delta_m=0.2, backend="schur_gpu")
+
+    assert abs(rc.final_cost - rg.final_cost) < 1e-7
+    for a, b in zip(rc.state.poses, rg.state.poses):
+        np.testing.assert_allclose([b.x, b.y, b.theta], [a.x, a.y, a.theta], rtol=0, atol=1e-7)
+    np.testing.assert_allclose(tg.phi, tc.phi, rtol=0, atol=1e-5)
+
+
+if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

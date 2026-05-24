@@ -121,6 +121,36 @@ kernel 群:
 
 `optimize_window_joint(sdf_smooth_info=λ)` (既定 0.0=off)。隣接 active ボクセル間 (4 近傍の右/下) に残差 `r = φ_u − φ_v` を加える Laplacian 正則化。H_φφ に対角 +λ / 非対角 −λ を足す疎構造なので、P3.1 の Schur 経路にそのまま COO 追加で乗る。schur と dense は平滑化 ON でも完全一致 (φ 差 0.0)。L-room 劣化マップで refine 後 φ の総変動 (roughness): no-smooth 950.3 → λ=2.0 で 923.4 と低下。観測の薄い領域の SDF を整える。accept/reject 用 `total_cost` にも平滑化項を含めて整合。
 
+### P3.3 所見 (2026-05-25): engine への joint 配線 + ATE 定量評価
+
+`ScanBaEngineConfig.use_joint`（+ `joint_sdf_prior_info`/`joint_sdf_smooth_info`）で固定ラグ窓の solve を `optimize_window_joint` に差し替え。joint は CPU 専用で `use_cuda` より優先（device 常駐 GPU マップは in-place SDF refine と非互換）。`JointWindowResult.diagnostics["inliers_per_scan"]` を追加し engine の gate をそのまま流用。replay CLI 設定にも反映。窓ごとに局所マップを再 fold するため refine した φ は揮発的（その scan の registration を鋭くする効果が主）。
+
+Cartographer backpack_2d を 300 scan replay → Cartographer 軌跡（疑似GT, 5581点）に時刻対応づけ、Umeyama 整列 ATE（`tools/eval_ate_scan_ba.py`, 258 マッチ）:
+
+| variant | rmse [m] | mean | p50 | p90 | max |
+|---------|----------|------|-----|-----|-----|
+| pose_only | 0.160 | 0.123 | 0.113 | 0.189 | 0.610 |
+| **joint** | **0.116** | 0.109 | 0.110 | 0.161 | **0.205** |
+
+- joint pose+SDF BA は **RMSE を 28% 改善**（0.160→0.116）、**最悪誤差を約 1/3**（0.610→0.205）に抑制。実データで「効く」ことを数字で確認。
+
+### P3.4 所見 (2026-05-25): Schur の GPU 化は割に合わない（正直な負の結果）
+
+`optimize_window_joint(backend="schur_gpu")`。H_φφ を device 上で `cupyx.scipy.sparse.linalg.splu`（cuSOLVER）で因子分解し、縮約まで GPU で実行。CPU schur と**数値完全一致**（cost/pose/φ machine-eps）。だが速くならない:
+
+- **solve は律速ではない**: 12 反復・1270 active-vox の窓を cProfile → 全 78 ms の内訳は gather 22 ms / assemble 17 ms / bilinear 15 ms。`splu` solve は数 ms 未満で上位に現れない。
+- **cuSOLVER sparse LU < scipy SuperLU**: 帯状 SPD（SDF 結合）の単体ベンチで V=1k〜50k 全域 GPU が 3〜4x **遅い**（V=50k: CPU 101 ms vs GPU 319 ms）。直接疎分解は scipy SuperLU が極めて強い。
+- 結論（P2.9 と同じ教訓）: joint BA の GPU 余地は線形 solve ではなく **gather/assemble のデータ項 Jacobian 蓄積**（pose-only の fused カーネル相当）。`schur_gpu` は正しく検証済みだが大規模 V 用・将来部品として温存。
+
+### P4 所見 (2026-05-25): 厳密な sliding-window marginalization
+
+`slide_window` の既定は「窓を出る最古 pose を強 AnchorPrior に焼き込む」近似で、その pose が持っていた情報を捨て恣意的な `info_xy/theta` に置換していた。P4 は原理的な置換 — 落とす pose を **Schur 補元で marginalize** する（`marginalize.py`）。
+
+- この固定ラグ窓では最古 pose（pose 0）は pose 1 とのみ factor を共有（motion prior）。data 項・anchor・前回の marginal prior は pose 0 の unary。よって pose 0 を消すと pose 1 に **3×3 の `MarginalizationPrior`** が残る。
+- `E(x) = ½(x−x_lin)ᵀΛ(x−x_lin) + gᵀ(x−x_lin)`。`window._evaluate` の (H += Λ, b += Λδ+g) 規約に一致。`WindowState.marg_prior` として畳み込む。
+- **厳密性をテストで証明**: 実 data+motion+anchor で組んだフル窓を 1 GN ステップ解いた retained pose の増分と、pose 0 を marginalize して縮約窓を解いた増分が**完全一致**（単段・再帰 marginalization とも atol 1e-9）。線形/ガウスでは first-estimate Jacobians により厳密。
+- `slide_window(marginalize=True, tsdf=...)` で再帰的に marginal prior を更新。engine の hot loop への採用（relinearization/FEJ の扱い）は P4.1 として保留。
+
 ### P2 ベンチ所見 (2026-05-24, GPU, cupy 14.1, CUDA 12.0)
 
 per-scan data-block (sample+Jacobian+JtWJ/JtWr) を cupy で実装、TSDF 常駐・30反復平均:
