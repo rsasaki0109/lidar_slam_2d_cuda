@@ -54,6 +54,9 @@ class ScanBaEngineConfig:
     # A total-cost threshold would scale with point count and never fire on real scans.
     loop_accept_rms_m: float = 0.3
     loop_max_correction_m: float = 1.5  # reject verify poses too far from odom prediction
+    # Run the fixed-lag window LM solve on the GPU (fused CUDA kernel, P2.5/P2.9).
+    # Numerically identical to the CPU path; falls back to CPU if cupy/CUDA is absent.
+    use_cuda: bool = False
 
 
 @dataclass
@@ -77,6 +80,21 @@ class ScanBaEngine:
     def __post_init__(self) -> None:
         self.graph = PoseGraph(cfg=PoseGraphConfig(max_iterations=50))
         self._tsdf = Tsdf2D.zeros(self.cfg.tsdf)
+        self._window_solver = self._resolve_window_solver()
+
+    def _resolve_window_solver(self):
+        """Pick the window LM backend: GPU fused kernel when requested+available,
+        else the CPU reference. Both are numerically identical."""
+        if not self.cfg.use_cuda:
+            return optimize_window
+        try:
+            from slamx.core.scan_ba import cuda
+
+            if cuda.is_available():
+                return cuda.optimize_window_cuda
+        except Exception:
+            pass
+        return optimize_window
 
     def set_imu_buffer(self, samples: list[ImuSample]) -> None:  # noqa: ARG002 - parity stub
         return None
@@ -185,7 +203,7 @@ class ScanBaEngine:
                 motion_priors=motion_priors,
                 anchor=anchor,
             )
-            res = optimize_window(
+            res = self._window_solver(
                 tsdf=self._tsdf,
                 state=state,
                 max_iters=self.cfg.optimize_max_iters,
