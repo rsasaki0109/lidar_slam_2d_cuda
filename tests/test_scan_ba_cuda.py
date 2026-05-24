@@ -88,10 +88,13 @@ def _window_state():
     return WindowState(poses=init, scans=scans, motion_priors=mps, anchor=AnchorPrior(pose=init[0]))
 
 
-def test_gpu_window_solve_matches_cpu():
+@pytest.mark.parametrize("backend", ["fused", "bincount"])
+def test_gpu_window_solve_matches_cpu(backend):
     tsdf = _tsdf()
     cpu = optimize_window(tsdf=tsdf, state=_window_state(), max_iters=25, huber_delta_m=0.15)
-    gpu = cuda.optimize_window_cuda(tsdf=tsdf, state=_window_state(), max_iters=25, huber_delta_m=0.15)
+    gpu = cuda.optimize_window_cuda(
+        tsdf=tsdf, state=_window_state(), max_iters=25, huber_delta_m=0.15, backend=backend
+    )
 
     assert gpu.iterations == cpu.iterations
     assert gpu.diagnostics["inliers_per_scan"] == cpu.diagnostics["inliers_per_scan"]

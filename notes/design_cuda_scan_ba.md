@@ -123,6 +123,21 @@ K=10、25 反復フル solve のベンチ (`tools/bench_scan_ba_cuda.py`):
 - ただし実用 2D ウィンドウ (K=10 × 200〜1000 点 = 2〜10k 点) はまだ分岐点以下で CPU 有利。残るボトルネックは**反復あたり数百回の小カーネル launch** (bincount×11・小 slice 演算・solve)。
 - **次の一手 (c)**: warp+sample+Jacobian+per-block reduction を 1 つの fused RawKernel に畳み、反復あたりの launch を数回に。これで分岐点を実用サイズまで下げるのが P2.5→P2.9 の目標。
 
+### P2.5c 所見 (2026-05-25): fused データ項カーネル
+
+(c) を `_DATA_KERNEL_SRC` / `optimize_window_cuda(backend="fused")` として実装。1 点 1 スレッドで warp→bilinear sample→Jacobian→Huber を計算し、scan ごとの累算器 (K×11: 上三角 H 6 + b 3 + cost + inlier) へ float64 `atomicAdd`。bincount×11＋多数の elementwise 演算が **evaluate あたり 1 カーネル launch** に畳まれる。CPU と数値完全一致 (poses 差 ≤ 3e-17、反復・cost・inlier 一致)。
+
+| window 点数 | CPU | bincount | fused | fused speedup |
+|-------------|------|----------|-------|---------------|
+| 2,000    | 13.6 ms | 65.6 ms | 29.5 ms | 0.46x |
+| 10,000   | 20.0 ms | 60.2 ms | 26.8 ms | 0.75x |
+| 50,000   | 204 ms  | 202 ms  | 88.5 ms | 2.30x |
+| 200,000  | 566 ms  | 221 ms  | 84.6 ms | 6.69x |
+
+- fused は bincount の **約 2.2x**、損益分岐が ~50k → ~15-20k 点へ低下、200k で 6.69x。
+- fused 時間は 2k で 29 ms・200k で 85 ms とほぼ一定 = データ項はもはやボトルネックでなく、**反復あたりの固定オーバーヘッド (30×30 `cp.linalg.solve` の launch・ブロック組み立て・motion prior の Python ループ) 律速**。実用 2D (2〜10k 点) で CPU を超えるには、この組み立て+solve も 1 つの kernel/グラフに畳む (CUDA graph capture or 全段 fused) のが次段 P2.9。
+- CPU と bincount フォールバックは維持 (`backend=` で選択)。
+
 ## 9. オープン問題 / リスク
 
 - **SDF の初期化**: スキャン到着初期は SDF がスカスカで残差が立たない。最初の \(K_0\) scan は scan-matching ベースで前段 estimate を作って SDF を埋める phase が要る。

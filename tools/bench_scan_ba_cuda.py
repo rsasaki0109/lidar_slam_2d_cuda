@@ -67,16 +67,23 @@ def main() -> None:
     k = 10
     has_gpu = cuda.is_available()
     print(f"window K={k}, CUDA={'yes' if has_gpu else 'no'}")
-    print(f"{'pts/scan':>9} {'window pts':>11} {'CPU ms':>9} {'GPU ms':>9} {'speedup':>8}")
+    hdr = f"{'pts/scan':>9} {'window pts':>11} {'CPU ms':>9} {'binc ms':>9} {'fused ms':>9} {'fused x':>8}"
+    print(hdr)
     for n_per in (200, 1000, 5000, 20000):
         st = _make_window(tsdf, k=k, n_per_scan=n_per)
         cpu_ms = _time(lambda: optimize_window(tsdf=tsdf, state=st, max_iters=25), repeats=5) * 1e3
-        gpu_ms = float("nan")
+        binc_ms = fused_ms = float("nan")
         if has_gpu:
-            cuda.optimize_window_cuda(tsdf=tsdf, state=st, max_iters=25)  # warm up JIT
-            gpu_ms = _time(lambda: cuda.optimize_window_cuda(tsdf=tsdf, state=st, max_iters=25), repeats=5) * 1e3
-        sp = cpu_ms / gpu_ms if gpu_ms == gpu_ms else float("nan")
-        print(f"{n_per:>9} {k * n_per:>11} {cpu_ms:>9.2f} {gpu_ms:>9.2f} {sp:>7.2f}x")
+            for be in ("bincount", "fused"):
+                cuda.optimize_window_cuda(tsdf=tsdf, state=st, max_iters=25, backend=be)  # warm up
+            binc_ms = _time(
+                lambda: cuda.optimize_window_cuda(tsdf=tsdf, state=st, max_iters=25, backend="bincount"), repeats=5
+            ) * 1e3
+            fused_ms = _time(
+                lambda: cuda.optimize_window_cuda(tsdf=tsdf, state=st, max_iters=25, backend="fused"), repeats=5
+            ) * 1e3
+        sp = cpu_ms / fused_ms if fused_ms == fused_ms else float("nan")
+        print(f"{n_per:>9} {k * n_per:>11} {cpu_ms:>9.2f} {binc_ms:>9.2f} {fused_ms:>9.2f} {sp:>7.2f}x")
 
 
 if __name__ == "__main__":
