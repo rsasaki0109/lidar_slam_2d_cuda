@@ -15,6 +15,7 @@ import os
 import numpy as np
 
 from slamx.core.scan_ba.tsdf import Tsdf2D
+from slamx.core.scan_ba.window import WindowResult, WindowState
 from slamx.core.types import Pose2
 
 
@@ -123,3 +124,185 @@ def accumulate_data_block_cuda(*, phi_d, weight_d, cfg, pose: Pose2, pts_d, hube
     b = JtW @ r
     cost = 0.5 * float((wts * r * r).sum().get())
     return cp.asnumpy(H), cp.asnumpy(b), cost, n_valid
+
+
+def optimize_window_cuda(
+    *,
+    tsdf: Tsdf2D,
+    state: WindowState,
+    max_iters: int = 30,
+    huber_delta_m: float = 0.15,
+    converge_dx_m: float = 1e-4,
+    converge_dtheta_rad: float = 1e-5,
+    lm_lambda_init: float = 1e-4,
+    lm_lambda_min: float = 1e-8,
+    lm_lambda_max: float = 1e6,
+) -> WindowResult:
+    """Fully on-device fixed-lag window LM solve (P2.5).
+
+    Mirrors `window.optimize_window` but keeps the TSDF, all window scan points,
+    poses, and the 3K x 3K normal equations resident on the GPU. Every LM iteration
+    evaluates all window points in a single batched pass and assembles/solves the
+    block system on device; only the scalar cost (accept/reject) and the final poses
+    cross back to the host, instead of the per-scan host syncs of the naive port.
+    """
+    cp = _cupy()
+    K = state.k
+    phi_d, weight_d = upload_tsdf(tsdf)
+    cfg = tsdf.cfg
+    n3 = 3 * K
+
+    # window points concatenated with a per-point scan index (segment id)
+    sizes = [int(s.shape[0]) for s in state.scans]
+    ntot = int(sum(sizes))
+    if ntot > 0:
+        pts = cp.asarray(np.concatenate(state.scans, axis=0), dtype=cp.float64)
+        seg = cp.repeat(cp.arange(K, dtype=cp.int64), cp.asarray(sizes, dtype=cp.int64))
+    else:
+        pts = cp.zeros((0, 2), dtype=cp.float64)
+        seg = cp.zeros((0,), dtype=cp.int64)
+
+    poses = cp.asarray([[p.x, p.y, p.theta] for p in state.poses], dtype=cp.float64)
+
+    has_mp = len(state.motion_priors) > 0
+    if has_mp:
+        mp_delta = cp.asarray(
+            [[m.delta_x, m.delta_y, m.delta_theta] for m in state.motion_priors], dtype=cp.float64
+        )
+        mp_info = cp.asarray(
+            [[m.info_xy, m.info_xy, m.info_theta] for m in state.motion_priors], dtype=cp.float64
+        )
+    anchor = state.anchor
+    if anchor is not None:
+        anc_pose = cp.asarray([anchor.pose.x, anchor.pose.y, anchor.pose.theta], dtype=cp.float64)
+        anc_info = cp.asarray([anchor.info_xy, anchor.info_xy, anchor.info_theta], dtype=cp.float64)
+
+    # block-diagonal scatter indices for the data-term H blocks (built once)
+    base = cp.arange(K, dtype=cp.int64) * 3
+    lr = cp.asarray([0, 0, 0, 1, 1, 1, 2, 2, 2], dtype=cp.int64)
+    lc = cp.asarray([0, 1, 2, 0, 1, 2, 0, 1, 2], dtype=cp.int64)
+    rows_bd = (base[:, None] + lr[None, :]).reshape(-1)
+    cols_bd = (base[:, None] + lc[None, :]).reshape(-1)
+
+    def _seg_sum(vals):
+        return cp.bincount(seg, weights=vals, minlength=K)
+
+    def evaluate(P):
+        """Assemble (H 3K x 3K, b 3K, cost scalar, inliers K) for poses P (K,3), on device."""
+        H = cp.zeros((n3, n3), dtype=cp.float64)
+        b = cp.zeros(n3, dtype=cp.float64)
+        cost = cp.asarray(0.0, dtype=cp.float64)
+        inliers = cp.zeros(K, dtype=cp.float64)
+
+        if ntot > 0:
+            th = P[seg, 2]
+            c, s = cp.cos(th), cp.sin(th)
+            tx, ty = P[seg, 0], P[seg, 1]
+            px, py = pts[:, 0], pts[:, 1]
+            pwx = c * px - s * py + tx
+            pwy = s * px + c * py + ty
+            xy = cp.stack([pwx, pwy], axis=1)
+            r, gx, gy, valid = _sample_cuda(cp, phi_d, weight_d, cfg, xy)
+            j2 = gx * (-(pwy - ty)) + gy * (pwx - tx)
+            abs_r = cp.abs(r)
+            wts = cp.where(abs_r > huber_delta_m, huber_delta_m / cp.maximum(abs_r, 1e-12), 1.0)
+            wts = cp.where(valid, wts, 0.0)
+
+            h00 = _seg_sum(wts * gx * gx)
+            h01 = _seg_sum(wts * gx * gy)
+            h02 = _seg_sum(wts * gx * j2)
+            h11 = _seg_sum(wts * gy * gy)
+            h12 = _seg_sum(wts * gy * j2)
+            h22 = _seg_sum(wts * j2 * j2)
+            b0 = _seg_sum(wts * gx * r)
+            b1 = _seg_sum(wts * gy * r)
+            b2 = _seg_sum(wts * j2 * r)
+
+            Hblk = cp.empty((K, 3, 3), dtype=cp.float64)
+            Hblk[:, 0, 0] = h00
+            Hblk[:, 0, 1] = Hblk[:, 1, 0] = h01
+            Hblk[:, 0, 2] = Hblk[:, 2, 0] = h02
+            Hblk[:, 1, 1] = h11
+            Hblk[:, 1, 2] = Hblk[:, 2, 1] = h12
+            Hblk[:, 2, 2] = h22
+            H[rows_bd, cols_bd] = Hblk.reshape(-1)
+            b[:] = cp.stack([b0, b1, b2], axis=1).reshape(-1)
+            cost = cost + 0.5 * cp.sum(wts * r * r)
+            inliers = _seg_sum(valid.astype(cp.float64))
+
+        if has_mp:
+            for i in range(K - 1):
+                Wd = mp_info[i]
+                ri = (P[i + 1] - P[i]) - mp_delta[i]
+                Wm = cp.diag(Wd)
+                H[3 * i : 3 * i + 3, 3 * i : 3 * i + 3] += Wm
+                H[3 * (i + 1) : 3 * (i + 1) + 3, 3 * (i + 1) : 3 * (i + 1) + 3] += Wm
+                H[3 * i : 3 * i + 3, 3 * (i + 1) : 3 * (i + 1) + 3] -= Wm
+                H[3 * (i + 1) : 3 * (i + 1) + 3, 3 * i : 3 * i + 3] -= Wm
+                b[3 * i : 3 * i + 3] += -Wd * ri
+                b[3 * (i + 1) : 3 * (i + 1) + 3] += Wd * ri
+                cost = cost + 0.5 * cp.sum(Wd * ri * ri)
+
+        if anchor is not None:
+            ri = P[0] - anc_pose
+            H[0:3, 0:3] += cp.diag(anc_info)
+            b[0:3] += anc_info * ri
+            cost = cost + 0.5 * cp.sum(anc_info * ri * ri)
+
+        return H, b, cost, inliers
+
+    eye = cp.eye(n3, dtype=cp.float64)
+    cur = poses.copy()
+    lam = float(lm_lambda_init)
+    iterations = 0
+    converged = False
+    inliers_dev = cp.zeros(K, dtype=cp.float64)
+    cost = float("inf")
+
+    for it in range(max_iters):
+        iterations = it + 1
+        H, b, cost_d, inliers_dev = evaluate(cur)
+        cost = float(cost_d)
+        if not bool((cp.diag(H) > 0).any()):
+            break
+
+        try:
+            dx = -cp.linalg.solve(H + lam * eye, b)
+        except Exception:
+            lam = min(lam * 10.0, lm_lambda_max)
+            continue
+
+        trial = cur + dx.reshape(K, 3)
+        _, _, trial_cost_d, _ = evaluate(trial)
+        trial_cost = float(trial_cost_d)
+
+        if trial_cost < cost:
+            step_xy = float(cp.max(cp.hypot(dx[0::3], dx[1::3])))
+            step_theta = float(cp.max(cp.abs(dx[2::3])))
+            cur = trial
+            lam = max(lam * 0.5, lm_lambda_min)
+            cost = trial_cost
+            if step_xy < converge_dx_m and step_theta < converge_dtheta_rad:
+                converged = True
+                break
+        else:
+            lam = min(lam * 10.0, lm_lambda_max)
+            if lam >= lm_lambda_max:
+                break
+
+    poses_host = cp.asnumpy(cur)
+    out_poses = [Pose2(float(row[0]), float(row[1]), float(row[2])) for row in poses_host]
+    inliers = [int(v) for v in cp.asnumpy(inliers_dev)]
+    result_state = WindowState(
+        poses=out_poses,
+        scans=state.scans,
+        motion_priors=list(state.motion_priors),
+        anchor=state.anchor,
+    )
+    return WindowResult(
+        state=result_state,
+        iterations=iterations,
+        final_cost=cost,
+        converged=converged,
+        diagnostics={"lm_lambda_final": lam, "inliers_per_scan": inliers, "backend": "cuda"},
+    )
