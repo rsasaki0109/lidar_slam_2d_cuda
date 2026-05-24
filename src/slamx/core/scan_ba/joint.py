@@ -23,6 +23,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import numpy as np
+from scipy.sparse import coo_matrix, identity
+from scipy.sparse.linalg import splu
 
 from slamx.core.scan_ba.align import _huber_weights
 from slamx.core.scan_ba.tsdf import Tsdf2D
@@ -89,7 +91,11 @@ def optimize_window_joint(
     lm_lambda_init: float = 1e-3,
     lm_lambda_min: float = 1e-8,
     lm_lambda_max: float = 1e6,
+    backend: str = "schur",
 ) -> JointWindowResult:
+    """backend="schur" (default) eliminates the SDF block via a sparse Schur complement
+    (scales to large active-voxel counts); "dense" builds the full (3K+V) system. Both
+    give the same Gauss-Newton/LM step."""
     K = state.k
     phi0_full = tsdf.phi.copy()  # fold-time values; the SDF prior pins phi here
 
@@ -120,14 +126,17 @@ def optimize_window_joint(
         idx_of = {v: i for i, v in enumerate(active_list)}
         return per_scan, active_list, idx_of
 
-    def assemble(per_scan, active_list, idx_of):
+    def assemble_blocks(per_scan, active_list, idx_of):
+        """Data-term blocks: Hxx (3K,3K), Hxp (3K,V), bx, bp, and the H_phiphi COO
+        triplets (rows, cols, vals). The SDF block is kept sparse for the Schur solve."""
         V = len(active_list)
-        n = 3 * K + V
-        H = np.zeros((n, n))
-        b = np.zeros(n)
+        Hxx = np.zeros((3 * K, 3 * K))
+        Hxp = np.zeros((3 * K, V))
+        bx = np.zeros(3 * K)
+        bp = np.zeros(V)
+        pp_r, pp_c, pp_v = [], [], []
         cost = 0.0
         inliers = []
-        flat_phi = tsdf.phi.ravel()
         for t in range(K):
             d = per_scan[t]
             if d is None:
@@ -139,29 +148,33 @@ def optimize_window_joint(
             dtheta = grad[:, 0] * (-(pw[:, 1] - pose.y)) + grad[:, 1] * (pw[:, 0] - pose.x)
             Jp = np.column_stack([grad[:, 0], grad[:, 1], dtheta])  # (P,3)
             base = 3 * t
-            # pose-pose block + pose b
             JtW = Jp.T * hw
-            H[base:base + 3, base:base + 3] += JtW @ Jp
-            b[base:base + 3] += JtW @ r
-            vloc = np.vectorize(idx_of.get)(neigh).astype(np.int64)  # (P,4) local voxel indices
-            # pose-sdf cross block + sdf-sdf block + sdf b
+            Hxx[base:base + 3, base:base + 3] += JtW @ Jp
+            bx[base:base + 3] += JtW @ r
+            vloc = np.vectorize(idx_of.get)(neigh).astype(np.int64)  # (P,4)
             for a in range(4):
-                col = 3 * K + vloc[:, a]
                 wa = wts[:, a]
-                # H_xphi (3 x ...) : sum hw * Jp_d * w_a
+                col = vloc[:, a]
                 for dd in range(3):
-                    np.add.at(H[base + dd], col, hw * Jp[:, dd] * wa)
-                    np.add.at(H[:, base + dd], col, hw * Jp[:, dd] * wa)  # symmetric
-                # sdf b
-                np.add.at(b, col, hw * wa * r)
+                    np.add.at(Hxp[base + dd], col, hw * Jp[:, dd] * wa)
+                np.add.at(bp, col, hw * wa * r)
                 for bb in range(4):
-                    np.add.at(H, (col, 3 * K + vloc[:, bb]), hw * wa * wts[:, bb])
+                    pp_r.append(vloc[:, a])
+                    pp_c.append(vloc[:, bb])
+                    pp_v.append(hw * wa * wts[:, bb])
             cost += 0.5 * float(np.sum(hw * r * r))
             inliers.append(int(r.size))
-        return H, b, cost, inliers, V, flat_phi
+        pp = (
+            np.concatenate(pp_r) if pp_r else np.zeros(0, np.int64),
+            np.concatenate(pp_c) if pp_c else np.zeros(0, np.int64),
+            np.concatenate(pp_v) if pp_v else np.zeros(0),
+        )
+        return Hxx, Hxp, bx, bp, pp, cost, inliers
 
-    def add_priors(H, b, cost, active_list):
-        # pose motion priors (global-frame, as in window._evaluate)
+    def add_priors_blocks(Hxx, bx, bp, cost, active_list):
+        """Add pose motion/anchor priors to (Hxx, bx) and the SDF fold-prior to bp.
+        The SDF prior's H contribution is the uniform `sdf_prior_info` on the H_phiphi
+        diagonal, added inside the solve."""
         for i, mp in enumerate(state.motion_priors):
             Wd = np.array([mp.info_xy, mp.info_xy, mp.info_theta])
             r = np.array([
@@ -171,12 +184,12 @@ def optimize_window_joint(
             ])
             W = np.diag(Wd)
             bi, bj = 3 * i, 3 * (i + 1)
-            H[bi:bi + 3, bi:bi + 3] += W
-            H[bj:bj + 3, bj:bj + 3] += W
-            H[bi:bi + 3, bj:bj + 3] -= W
-            H[bj:bj + 3, bi:bi + 3] -= W
-            b[bi:bi + 3] += -Wd * r
-            b[bj:bj + 3] += Wd * r
+            Hxx[bi:bi + 3, bi:bi + 3] += W
+            Hxx[bj:bj + 3, bj:bj + 3] += W
+            Hxx[bi:bi + 3, bj:bj + 3] -= W
+            Hxx[bj:bj + 3, bi:bi + 3] -= W
+            bx[bi:bi + 3] += -Wd * r
+            bx[bj:bj + 3] += Wd * r
             cost += 0.5 * float(np.sum(Wd * r * r))
         if state.anchor is not None:
             Wd = np.array([state.anchor.info_xy, state.anchor.info_xy, state.anchor.info_theta])
@@ -185,19 +198,39 @@ def optimize_window_joint(
                 cur_poses[0].y - state.anchor.pose.y,
                 cur_poses[0].theta - state.anchor.pose.theta,
             ])
-            H[0:3, 0:3] += np.diag(Wd)
-            b[0:3] += Wd * r
+            Hxx[0:3, 0:3] += np.diag(Wd)
+            bx[0:3] += Wd * r
             cost += 0.5 * float(np.sum(Wd * r * r))
-        # SDF prior: pin each active voxel to its fold-time value phi0
         if active_list:
             av = np.array(active_list, dtype=np.int64)
-            cur = tsdf.phi.ravel()[av]
-            rp = cur - phi0_full.ravel()[av]
-            diag = np.arange(3 * K, 3 * K + len(av))
-            H[diag, diag] += sdf_prior_info
-            b[diag] += sdf_prior_info * rp
+            rp = tsdf.phi.ravel()[av] - phi0_full.ravel()[av]
+            bp += sdf_prior_info * rp
             cost += 0.5 * float(sdf_prior_info * np.sum(rp * rp))
         return cost
+
+    def solve_step(Hxx, Hxp, bx, bp, pp, V, lam):
+        """One LM increment dx = [dx_pose (3K); dx_phi (V)] by Schur-eliminating the
+        SDF block. H_phiphi = data + (sdf_prior_info + lam) I; H_xx damped by lam."""
+        Hxx_lm = Hxx + lam * np.eye(3 * K)
+        if V == 0:
+            return -np.linalg.solve(Hxx_lm, bx)
+        diagp = sdf_prior_info + lam
+        pp_r, pp_c, pp_v = pp
+        rhs = np.column_stack([Hxp.T, bp])  # (V, 3K+1) = [H_phix | b_phi]
+        if backend == "dense":
+            Hpp = np.zeros((V, V))
+            if pp_v.size:
+                np.add.at(Hpp, (pp_r, pp_c), pp_v)
+            Hpp[np.diag_indices(V)] += diagp
+            Y = np.linalg.solve(Hpp, rhs)
+        else:  # sparse Schur
+            Hpp = coo_matrix((pp_v, (pp_r, pp_c)), shape=(V, V)).tocsc() + diagp * identity(V, format="csc")
+            Y = splu(Hpp).solve(rhs)
+        YH, Yb = Y[:, :3 * K], Y[:, 3 * K]
+        S = Hxx_lm - Hxp @ YH
+        dxx = np.linalg.solve(S, -(bx - Hxp @ Yb))
+        dxp = -(Yb + YH @ dxx)
+        return np.concatenate([dxx, dxp])
 
     def total_cost():
         """Cost at the current poses/phi (data + priors), for accept/reject."""
@@ -246,15 +279,14 @@ def optimize_window_joint(
         iterations = it + 1
         per_scan, active_list, idx_of = gather()
         n_active = len(active_list)
-        H, b, cost, inliers, V, _ = assemble(per_scan, active_list, idx_of)
-        cost = add_priors(H, b, cost, active_list)
-        if not np.any(np.diag(H) > 0):
+        Hxx, Hxp, bx, bp, pp, cost, inliers = assemble_blocks(per_scan, active_list, idx_of)
+        cost = add_priors_blocks(Hxx, bx, bp, cost, active_list)
+        if not np.any(np.diag(Hxx) > 0):
             break
 
-        H_lm = H + lam * np.eye(H.shape[0])
         try:
-            dx = -np.linalg.solve(H_lm, b)
-        except np.linalg.LinAlgError:
+            dx = solve_step(Hxx, Hxp, bx, bp, pp, n_active, lam)
+        except Exception:
             lam = min(lam * 10.0, lm_lambda_max)
             continue
 

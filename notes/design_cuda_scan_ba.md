@@ -105,6 +105,18 @@ kernel 群:
 - 劣化マップ上で joint は **pose-only より低コスト** (φ も refine してデータ残差を下げる)。active ボクセル 560、pose は GT 近傍維持 (max dev 0.015 m)。
 - 制約: dense (3K+V)² 直接 solve なので小ウィンドウ向けリファレンス。**P3.1**: H_φφ を Schur 消去 (SDF ブロックは data の 4×4 + prior 対角 + 平滑化の疎構造) して 3K pose 系に縮約、その後 GPU 化。**P3.2**: SDF 平滑化項を追加。
 
+### P3.1 所見 (2026-05-25): SDF ブロックの疎 Schur 消去
+
+`optimize_window_joint(backend="schur")`。ブロック組み立て (Hxx 3K×3K dense, Hxp 3K×V dense, H_φφ を scipy.sparse COO) に変更し、各 LM 反復で H_φφ_lm = data + (sdf_prior_info+lam)·I を `splu` で因子分解、Y = H_φφ⁻¹[H_φx | b_φ] を解いて pose 系に縮約 (S = Hxx_lm − Hxp·Y_H, dxx = S⁻¹·rhs, dφ = −(Y_b + Y_H·dxx))。dense full-solve と**完全一致** (pose/φ 差 0.0)。
+
+| backend | 560-voxel 窓の solve | 結果 |
+|---------|----------------------|------|
+| dense (full 3K+V) | 26.56 s | cost 0.523798 |
+| **schur (sparse)** | **0.12 s** | cost 0.523798 |
+
+- **~220x 高速**で同一解。dense は (3K+V)³ ∝ V³ だが Schur は疎 H_φφ の因子分解 + 3K×3K の小 solve なので V に対しスケール。joint BA が実用ウィンドウサイズで回る。
+- 次 (**P3.1 GPU / P3.2**): Schur の H_φφ 因子分解を GPU (cuSOLVER sparse / 反復法) に、SDF 平滑化項追加、engine への joint backend 配線。
+
 ### P2 ベンチ所見 (2026-05-24, GPU, cupy 14.1, CUDA 12.0)
 
 per-scan data-block (sample+Jacobian+JtWJ/JtWr) を cupy で実装、TSDF 常駐・30反復平均:
