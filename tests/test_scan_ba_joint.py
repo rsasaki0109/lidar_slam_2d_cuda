@@ -289,6 +289,46 @@ def test_joint_gpu_pcg_matches_splu():
     np.testing.assert_allclose(tp.phi, tl.phi, rtol=0, atol=1e-5)
 
 
+@pytest.mark.skipif(not _gpu_sparse_works(), reason="GPU sparse unavailable")
+def test_joint_gpu_fused_matches_vectorized():
+    """The fused atomicAdd assemble RawKernel (default) must give the same GN/LM step
+    as the cupy bincount + cp.add.at scatter it replaces. float64 atomicAdd reorders
+    the summation, so the agreement is to round-off, not bit-exact."""
+    cfg = _cfg()
+    gt = _gt()[:3]
+    scans = [_raycast_scan(p, n_beams=120) for p in gt]
+    base = _clean_map(cfg, gt, scans)
+    rng = np.random.default_rng(9)
+    m = base.weight > 0
+    noise = rng.normal(0.0, 0.05, size=int(m.sum())).astype(np.float32)
+
+    def state():
+        mps = [
+            MotionPrior(
+                delta_x=gt[i + 1].x - gt[i].x, delta_y=gt[i + 1].y - gt[i].y,
+                delta_theta=gt[i + 1].theta - gt[i].theta, info_xy=3.0, info_theta=3.0,
+            )
+            for i in range(len(gt) - 1)
+        ]
+        return WindowState(poses=list(gt), scans=scans, motion_priors=mps, anchor=AnchorPrior(pose=gt[0]))
+
+    tv = Tsdf2D(cfg=cfg, phi=base.phi.copy(), weight=base.weight.copy())
+    tv.phi[m] += noise
+    rv = optimize_window_joint(tsdf=tv, state=state(), max_iters=12, huber_delta_m=0.2,
+                               backend="gpu", gpu_assemble="vectorized")
+
+    tf = Tsdf2D(cfg=cfg, phi=base.phi.copy(), weight=base.weight.copy())
+    tf.phi[m] += noise
+    rf = optimize_window_joint(tsdf=tf, state=state(), max_iters=12, huber_delta_m=0.2,
+                               backend="gpu", gpu_assemble="fused")
+
+    assert rv.num_active_voxels == rf.num_active_voxels
+    assert abs(rv.final_cost - rf.final_cost) < 1e-7
+    for a, b in zip(rv.state.poses, rf.state.poses):
+        np.testing.assert_allclose([b.x, b.y, b.theta], [a.x, a.y, a.theta], rtol=0, atol=1e-7)
+    np.testing.assert_allclose(tf.phi, tv.phi, rtol=0, atol=1e-5)
+
+
 def test_joint_gpu_rejects_smoothness():
     """The GPU path does not implement the SDF smoothness regulariser; it must say so
     rather than silently dropping the term."""

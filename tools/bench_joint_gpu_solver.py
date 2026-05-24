@@ -1,15 +1,16 @@
-"""Benchmark the joint pose+SDF GPU solve: cuSOLVER sparse-LU vs Jacobi-PCG (P3.6).
+"""Benchmark the joint pose+SDF GPU assemble: cupy vectorized vs fused RawKernel (P3.7).
 
-The full-GPU joint window solve (`backend="gpu"`) was profiled (P3.5) to be bound by
-the SDF-block linear solve: cuSOLVER sparse-LU factorization (`cupyx.scipy.sparse.linalg.splu`)
-dominated each LM iteration. H_phiphi is SPD and, under the SDF prior, strongly diagonally
-dominant -- so a Jacobi-preconditioned CG (cuSPARSE spmm + reductions, no factorization)
-should converge in a handful of iterations and remove that wall.
+After P3.6 removed the linear-solve wall (splu -> Jacobi-PCG), profiling the full-GPU
+joint window solve (`backend="gpu"`) showed the bottleneck had moved to the gather +
+assemble -- specifically the 6 per-block `bincount` reductions and the 16 `cp.add.at`
+scatters that build the data block of the normal equations (Hxx / b_x / H_xphi / b_phi),
+each a launch-bound sorted/atomic pass. P3.7 fuses all of them into a single atomicAdd
+RawKernel (`gpu_assemble="fused"`, default).
 
-This times a full `optimize_window_joint(backend="gpu", ...)` (all LM iterations) for both
-gpu_solver="splu" and gpu_solver="pcg" across a range of active-voxel counts (driven by
-the beam count), reporting wall ms/solve and the speedup. Both produce the same GN/LM step
-(pinned by test_joint_gpu_pcg_matches_splu).
+This times a full `optimize_window_joint(backend="gpu", gpu_solver="pcg")` (all LM
+iterations) for gpu_assemble="vectorized" vs "fused" across a range of active-voxel
+counts, reporting wall ms/solve and the speedup. Both produce the same GN/LM step to
+round-off (pinned by test_joint_gpu_fused_matches_vectorized).
 
 Usage:
   CUDA_PATH=/usr env -u PYTHONPATH -u AMENT_PREFIX_PATH .venv/bin/python tools/bench_joint_gpu_solver.py
@@ -62,7 +63,7 @@ def _build(cfg, k: int, n_beams: int):
     return base, state, m, noise
 
 
-def _time(cfg, base, state, m, noise, solver: str, reps: int):
+def _time(cfg, base, state, m, noise, solver: str, reps: int, assemble: str = "fused"):
     import cupy as cp
 
     n_active = 0
@@ -74,7 +75,7 @@ def _time(cfg, base, state, m, noise, solver: str, reps: int):
         cp.cuda.Stream.null.synchronize()
         t0 = time.perf_counter()
         res = optimize_window_joint(tsdf=t, state=state, max_iters=12, huber_delta_m=0.2,
-                                    backend="gpu", gpu_solver=solver)
+                                    backend="gpu", gpu_solver=solver, gpu_assemble=assemble)
         cp.cuda.Stream.null.synchronize()
         dt = time.perf_counter() - t0
         if r > 0:
@@ -87,17 +88,17 @@ def main() -> None:
     K = 5
     reps = 3
     n_beams = 1080
-    print(f"joint GPU solve: splu (cuSOLVER LU) vs pcg (Jacobi-CG)  K={K}, max_iters=12, beams={n_beams}, best of {reps}")
-    print(f"{'res_m':>6} {'trunc':>6} {'V_active':>9} {'iters':>6} {'splu ms':>9} {'pcg ms':>9} {'speedup':>8}")
-    # finer resolution + wider truncation drive the active-voxel count (the size of the
-    # SDF block being factorized) up into the regime where LU factorization hurts.
+    print(f"joint GPU window solve (backend='gpu', pcg), K={K}, max_iters=12, beams={n_beams}, best of {reps}")
+    print("end-to-end ms/solve (all LM iters): vectorized assemble (bincount+add.at) vs fused RawKernel (P3.7)")
+    print(f"{'res_m':>6} {'trunc':>6} {'V_active':>9} {'iters':>6} {'vec ms':>9} {'fused ms':>9} {'speedup':>8}")
+    # finer resolution + wider truncation drive the active-voxel count up.
     for res, trunc in ((0.04, 0.6), (0.03, 0.8), (0.02, 1.0), (0.015, 1.2)):
         cfg = _cfg(res, trunc)
         base, state, m, noise = _build(cfg, K, n_beams)
-        ms_lu, V, it = _time(cfg, base, state, m, noise, "splu", reps)
-        ms_cg, V2, it2 = _time(cfg, base, state, m, noise, "pcg", reps)
+        ms_vec, V, it = _time(cfg, base, state, m, noise, "pcg", reps, assemble="vectorized")
+        ms_fus, V2, it2 = _time(cfg, base, state, m, noise, "pcg", reps, assemble="fused")
         assert V == V2, (V, V2)
-        print(f"{res:>6.3f} {trunc:>6.2f} {V:>9} {it:>6} {ms_lu:>9.1f} {ms_cg:>9.1f} {ms_lu / ms_cg:>7.2f}x")
+        print(f"{res:>6.3f} {trunc:>6.2f} {V:>9} {it:>6} {ms_vec:>9.1f} {ms_fus:>9.1f} {ms_vec / ms_fus:>7.2f}x")
 
 
 if __name__ == "__main__":

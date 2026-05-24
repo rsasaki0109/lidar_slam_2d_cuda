@@ -111,6 +111,78 @@ def _pcg_spd_multi(cp, A, B, tol=1e-12, max_iter=2000):
     return X
 
 
+_FUSED_ASSEMBLE_SRC = r"""
+extern "C" __global__
+void fused_assemble(
+    const long long* seg, const double* hw, const double* rv,
+    const double* j0, const double* j1, const double* j2,
+    const long long* vloc, const double* wts,
+    const int M, const int V,
+    double* Hxx_blk, double* bx, double* Hxp, double* bp)
+{
+    int t = blockDim.x * blockIdx.x + threadIdx.x;
+    if (t >= M) return;
+    int s = (int)seg[t];
+    double w = hw[t];
+    double r = rv[t];
+    double J[3]; J[0] = j0[t]; J[1] = j1[t]; J[2] = j2[t];
+    // per-scan 3x3 pose block + b_x
+    for (int d1 = 0; d1 < 3; ++d1) {
+        double wjd1 = w * J[d1];
+        atomicAdd(&bx[3 * s + d1], wjd1 * r);
+        for (int d2 = 0; d2 < 3; ++d2)
+            atomicAdd(&Hxx_blk[s * 9 + d1 * 3 + d2], wjd1 * J[d2]);
+    }
+    // H_xphi cross block + b_phi over the 4 bilinear corners
+    for (int a = 0; a < 4; ++a) {
+        long long col = vloc[t * 4 + a];
+        double wwa = w * wts[t * 4 + a];
+        atomicAdd(&bp[col], wwa * r);
+        for (int d = 0; d < 3; ++d)
+            atomicAdd(&Hxp[((long long)(3 * s + d)) * V + col], wwa * J[d]);
+    }
+}
+"""
+
+_FUSED_ASSEMBLE_KERNEL = None
+
+
+def _fused_assemble_kernel(cp):
+    global _FUSED_ASSEMBLE_KERNEL
+    if _FUSED_ASSEMBLE_KERNEL is None:
+        _FUSED_ASSEMBLE_KERNEL = cp.RawKernel(_FUSED_ASSEMBLE_SRC, "fused_assemble")
+    return _FUSED_ASSEMBLE_KERNEL
+
+
+def _fused_assemble_gpu(cp, segv, hw, rv, Jcols, vloc, wtsv, K, V):
+    """One RawKernel that atomicAdds the entire data block of the joint normal
+    equations -- the per-scan 3x3 pose Hessian blocks (`Hxx_blk`, K*9), b_x (3K),
+    the H_xphi cross block (`Hxp`, 3K*V row-major) and b_phi (V) -- in a single
+    launch. Replaces the 6 per-block `bincount` reductions plus the 16 `cp.add.at`
+    scatters (each a sorted/atomic pass), which profiling showed dominate the
+    assemble at the engine's window sizes once the linear solve stopped being the
+    wall (P3.6). float64 atomicAdd reorders sum order vs the vectorized path, so the
+    result agrees only to round-off (pinned loosely by the gpu-vs-cpu tests)."""
+    M = int(rv.size)
+    Hxx_blk = cp.zeros(K * 9, dtype=cp.float64)
+    bx = cp.zeros(3 * K, dtype=cp.float64)
+    Hxp = cp.zeros(3 * K * V, dtype=cp.float64)
+    bp = cp.zeros(V, dtype=cp.float64)
+    if M == 0:
+        return Hxx_blk, bx, Hxp, bp
+    ca = cp.ascontiguousarray
+    args = (
+        ca(segv, dtype=cp.int64), ca(hw, dtype=cp.float64), ca(rv, dtype=cp.float64),
+        ca(Jcols[0], dtype=cp.float64), ca(Jcols[1], dtype=cp.float64), ca(Jcols[2], dtype=cp.float64),
+        ca(vloc, dtype=cp.int64), ca(wtsv, dtype=cp.float64),
+        np.int32(M), np.int32(V), Hxx_blk, bx, Hxp, bp,
+    )
+    threads = 128
+    blocks = (M + threads - 1) // threads
+    _fused_assemble_kernel(cp)((blocks,), (threads,), args)
+    return Hxx_blk, bx, Hxp, bp
+
+
 def _bilinear_terms_gpu(cp, phi_d, wt_d, cfg, pts_w):
     """Device port of `_bilinear_terms`. phi_d/wt_d are float32 (matching the host TSDF
     store so r is computed from the same float32 voxel values); returns device arrays
@@ -220,7 +292,7 @@ def _pose_priors_host(state: WindowState, cur_poses, K: int):
 def _optimize_window_joint_gpu(
     *, tsdf, state, max_iters, huber_delta_m, sdf_prior_info,
     converge_dx_m, converge_dtheta_rad, lm_lambda_init, lm_lambda_min, lm_lambda_max,
-    gpu_solver="pcg",
+    gpu_solver="pcg", gpu_assemble="fused",
 ) -> JointWindowResult:
     """Fully on-device joint pose+SDF window solve (P3.5).
 
@@ -319,39 +391,50 @@ def _optimize_window_joint_gpu(
 
                 active = cp.unique(neighv.ravel())
                 n_active = int(active.size)
+                V = n_active
                 vloc = cp.searchsorted(active, neighv)  # (M,4) local voxel indices
                 inliers = [int(v) for v in cp.asnumpy(cp.bincount(segv, minlength=K))]
 
-                def _seg(vals):
-                    return cp.bincount(segv, weights=vals, minlength=K)
+                if gpu_assemble == "fused":
+                    # one RawKernel: per-scan 3x3 pose blocks + b_x + H_xphi + b_phi,
+                    # replacing the 6 bincount reductions and 16 cp.add.at scatters.
+                    Hxx_blk, bx, Hxp_flat, bp = _fused_assemble_gpu(
+                        cp, segv, hw, rv, Jcols, vloc, wtsv, K, V)
+                    Hxx[rows_bd, cols_bd] = Hxx_blk
+                    Hxp = Hxp_flat.reshape(3 * K, V)
+                else:
+                    def _seg(vals):
+                        return cp.bincount(segv, weights=vals, minlength=K)
 
-                h = [_seg(hw * Jcols[i] * Jcols[j]) for i, j in
-                     ((0, 0), (0, 1), (0, 2), (1, 1), (1, 2), (2, 2))]
-                Hblk = cp.empty((K, 3, 3), dtype=cp.float64)
-                Hblk[:, 0, 0] = h[0]
-                Hblk[:, 0, 1] = Hblk[:, 1, 0] = h[1]
-                Hblk[:, 0, 2] = Hblk[:, 2, 0] = h[2]
-                Hblk[:, 1, 1] = h[3]
-                Hblk[:, 1, 2] = Hblk[:, 2, 1] = h[4]
-                Hblk[:, 2, 2] = h[5]
-                Hxx[rows_bd, cols_bd] = Hblk.reshape(-1)
-                bx = cp.stack([_seg(hw * Jcols[d] * rv) for d in range(3)], axis=1).reshape(-1)
+                    h = [_seg(hw * Jcols[i] * Jcols[j]) for i, j in
+                         ((0, 0), (0, 1), (0, 2), (1, 1), (1, 2), (2, 2))]
+                    Hblk = cp.empty((K, 3, 3), dtype=cp.float64)
+                    Hblk[:, 0, 0] = h[0]
+                    Hblk[:, 0, 1] = Hblk[:, 1, 0] = h[1]
+                    Hblk[:, 0, 2] = Hblk[:, 2, 0] = h[2]
+                    Hblk[:, 1, 1] = h[3]
+                    Hblk[:, 1, 2] = Hblk[:, 2, 1] = h[4]
+                    Hblk[:, 2, 2] = h[5]
+                    Hxx[rows_bd, cols_bd] = Hblk.reshape(-1)
+                    bx = cp.stack([_seg(hw * Jcols[d] * rv) for d in range(3)], axis=1).reshape(-1)
+                    bp = cp.zeros(V, dtype=cp.float64)
+                    Hxp_flat = cp.zeros(3 * K * V, dtype=cp.float64)
+                    for a in range(4):
+                        col = vloc[:, a]
+                        wa = wtsv[:, a]
+                        for d in range(3):
+                            cp.add.at(Hxp_flat, (3 * segv + d) * V + col, hw * Jcols[d] * wa)
+                        cp.add.at(bp, col, hw * wa * rv)
+                    Hxp = Hxp_flat.reshape(3 * K, V)
 
-                V = n_active
-                bp = cp.zeros(V, dtype=cp.float64)
-                Hxp_flat = cp.zeros(3 * K * V, dtype=cp.float64)
+                # H_phiphi triplets (both paths): the 4x4 corner outer product per point
                 pr, pcl, pv = [], [], []
                 for a in range(4):
-                    col = vloc[:, a]
                     wa = wtsv[:, a]
-                    for d in range(3):
-                        cp.add.at(Hxp_flat, (3 * segv + d) * V + col, hw * Jcols[d] * wa)
-                    cp.add.at(bp, col, hw * wa * rv)
                     for b2 in range(4):
                         pr.append(vloc[:, a])
                         pcl.append(vloc[:, b2])
                         pv.append(hw * wa * wtsv[:, b2])
-                Hxp = Hxp_flat.reshape(3 * K, V)
                 pp_r, pp_c, pp_v = cp.concatenate(pr), cp.concatenate(pcl), cp.concatenate(pv)
                 data_c = 0.5 * float(cp.sum(hw * rv * rv))
 
@@ -452,6 +535,7 @@ def optimize_window_joint(
     lm_lambda_max: float = 1e6,
     backend: str = "schur",
     gpu_solver: str = "pcg",
+    gpu_assemble: str = "fused",
 ) -> JointWindowResult:
     """backend="schur" (default) eliminates the SDF block via a sparse Schur complement
     (scales to large active-voxel counts); "dense" builds the full (3K+V) system;
@@ -461,7 +545,9 @@ def optimize_window_joint(
     SDF smoothness term. For backend="gpu", gpu_solver selects the SDF-block solve:
     "pcg" (default) uses Jacobi-preconditioned CG (cuSPARSE spmm, no factorization --
     H_phiphi is diagonally dominant under the SDF prior); "splu" keeps the cuSOLVER
-    sparse-LU factorization for comparison."""
+    sparse-LU factorization for comparison. gpu_assemble selects the data-block build:
+    "fused" (default) uses a single atomicAdd RawKernel for Hxx/b_x/H_xphi/b_phi;
+    "vectorized" keeps the cupy bincount + cp.add.at scatters for comparison."""
     if backend == "gpu":
         if sdf_smooth_info > 0.0:
             raise NotImplementedError("backend='gpu' does not support sdf_smooth_info > 0")
@@ -470,7 +556,7 @@ def optimize_window_joint(
             sdf_prior_info=sdf_prior_info, converge_dx_m=converge_dx_m,
             converge_dtheta_rad=converge_dtheta_rad, lm_lambda_init=lm_lambda_init,
             lm_lambda_min=lm_lambda_min, lm_lambda_max=lm_lambda_max,
-            gpu_solver=gpu_solver,
+            gpu_solver=gpu_solver, gpu_assemble=gpu_assemble,
         )
     K = state.k
     phi0_full = tsdf.phi.copy()  # fold-time values; the SDF prior pins phi here
