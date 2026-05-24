@@ -4,7 +4,13 @@ import numpy as np
 import pytest
 
 from slamx.core.scan_ba import Tsdf2DConfig
-from slamx.core.scan_ba.window import _accumulate_data_block
+from slamx.core.scan_ba.window import (
+    AnchorPrior,
+    MotionPrior,
+    WindowState,
+    _accumulate_data_block,
+    optimize_window,
+)
 from slamx.core.scan_ba.tsdf import build_tsdf_from_signed_distance
 from slamx.core.types import Pose2
 
@@ -63,6 +69,35 @@ def test_gpu_data_block_empty_when_off_map():
     assert n == 0
     assert cost == 0.0
     assert np.allclose(H, 0.0)
+
+
+def _window_state():
+    gt = [Pose2(2.0 + 0.3 * i, 1.5 + 0.2 * i, 0.1 + 0.05 * i) for i in range(4)]
+    scans = [_raycast_scan(p) for p in gt]
+    init = [Pose2(p.x + 0.08, p.y - 0.06, p.theta + 0.03) for p in gt]
+    mps = [
+        MotionPrior(
+            delta_x=gt[i + 1].x - gt[i].x,
+            delta_y=gt[i + 1].y - gt[i].y,
+            delta_theta=gt[i + 1].theta - gt[i].theta,
+            info_xy=3.0,
+            info_theta=3.0,
+        )
+        for i in range(len(gt) - 1)
+    ]
+    return WindowState(poses=init, scans=scans, motion_priors=mps, anchor=AnchorPrior(pose=init[0]))
+
+
+def test_gpu_window_solve_matches_cpu():
+    tsdf = _tsdf()
+    cpu = optimize_window(tsdf=tsdf, state=_window_state(), max_iters=25, huber_delta_m=0.15)
+    gpu = cuda.optimize_window_cuda(tsdf=tsdf, state=_window_state(), max_iters=25, huber_delta_m=0.15)
+
+    assert gpu.iterations == cpu.iterations
+    assert gpu.diagnostics["inliers_per_scan"] == cpu.diagnostics["inliers_per_scan"]
+    assert abs(gpu.final_cost - cpu.final_cost) < 1e-9
+    for a, b in zip(cpu.state.poses, gpu.state.poses):
+        np.testing.assert_allclose([b.x, b.y, b.theta], [a.x, a.y, a.theta], rtol=0, atol=1e-9)
 
 
 if __name__ == "__main__":

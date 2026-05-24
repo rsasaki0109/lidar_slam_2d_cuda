@@ -106,6 +106,23 @@ per-scan data-block (sample+Jacobian+JtWJ/JtWr) を cupy で実装、TSDF 常駐
 - **示唆**: 実用 2D scan-BA で GPU を活かすには (a) ウィンドウ全 scan の点を 1 カーネルにバッチ、(b) LM 反復中の host 同期を排除し全反復を on-device 化、(c) sample+Jacobian+reduction を 1 つの fused custom kernel に。CUDA_PATH は `/usr` (cupy JIT が headers を要求、`scan_ba/cuda.py` が自動 setdefault)。
 - CPU フォールバックは維持。`cuda.is_available()` 偽なら自動 skip。
 
+### P2.5 所見 (2026-05-25): ウィンドウ LM を on-device 化
+
+(a)+(b) を `optimize_window_cuda` (`scan_ba/cuda.py`) として実装。TSDF・全 scan 点 (concat + segment id)・poses・3K×3K 正規方程式を device 常駐にし、各反復は全点 1 パスで評価 (per-point の H/b 寄与を `bincount` で scan ごとに segment-reduce → block-diagonal を組み立て → `cp.linalg.solve`)。host へ渡すのは accept/reject の cost スカラと最終 poses のみ。CPU `optimize_window` と数値完全一致 (poses 差 ≤ 4e-16、反復数・cost・inlier 一致)。
+
+K=10、25 反復フル solve のベンチ (`tools/bench_scan_ba_cuda.py`):
+
+| window 点数 | CPU (numpy) | GPU (cupy) | speedup |
+|-------------|-------------|------------|---------|
+| 2,000    | 10.8 ms | 41.4 ms | 0.26x |
+| 10,000   | 16.5 ms | 41.9 ms | 0.40x |
+| 50,000   | 177 ms  | 178 ms  | 0.99x |
+| 200,000  | 550 ms  | 209 ms  | 2.64x |
+
+- 素朴 P2 (per-block host sync) では全域で負けていたのに対し、**損益分岐が ~50k 点へ低下、200k で 2.64x**。host 同期は反復あたり O(1) に削減済み。
+- ただし実用 2D ウィンドウ (K=10 × 200〜1000 点 = 2〜10k 点) はまだ分岐点以下で CPU 有利。残るボトルネックは**反復あたり数百回の小カーネル launch** (bincount×11・小 slice 演算・solve)。
+- **次の一手 (c)**: warp+sample+Jacobian+per-block reduction を 1 つの fused RawKernel に畳み、反復あたりの launch を数回に。これで分岐点を実用サイズまで下げるのが P2.5→P2.9 の目標。
+
 ## 9. オープン問題 / リスク
 
 - **SDF の初期化**: スキャン到着初期は SDF がスカスカで残差が立たない。最初の \(K_0\) scan は scan-matching ベースで前段 estimate を作って SDF を埋める phase が要る。
