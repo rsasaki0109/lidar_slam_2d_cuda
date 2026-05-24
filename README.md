@@ -6,7 +6,7 @@
 
 ![loop closure off vs on](docs/assets/loop_closure_real.gif)
 
-*Loop closure on Google Cartographer `backpack_2d` (300 scans, 159 loop edges): without it the walls smear as drift accumulates (left); with it, revisits add pose-graph constraints that pull the drift back and keep the walls crisp (right).*
+*Loop closure on Google Cartographer `backpack_2d` (500 scans, 279 loop edges): without it the walls smear as drift accumulates (left); with it, each revisit (green edges) adds a pose-graph constraint that pulls the drift back and keeps the walls crisp (right).*
 
 2D LiDAR SLAM with a fixed-lag, **scan-level bundle-adjustment** core (CUDA-bound). ROS-free, CLI-first.
 

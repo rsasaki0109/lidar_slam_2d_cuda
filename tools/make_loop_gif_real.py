@@ -55,10 +55,12 @@ def _loop_cfg(config_path: Path, *, loop: bool) -> dict:
 def _run(cfg: dict, scans: list):
     eng = _scan_ba_engine_from_config(cfg, None)
     snaps: list[list[Pose2]] = []
+    edges: list[list[tuple[int, int]]] = []  # loop edges present after each scan
     for sc in scans:
         eng.handle_scan(sc)
         snaps.append([Pose2(p.x, p.y, p.theta) for p in eng.graph.poses])
-    return snaps, eng
+        edges.append(sorted(eng._loop_edges))
+    return snaps, edges, eng
 
 
 def _build_cache(args) -> dict:
@@ -71,9 +73,9 @@ def _build_cache(args) -> dict:
         scans.append(sc)
     print(f"loaded {len(scans)} scans")
 
-    off_snaps, eng_off = _run(_loop_cfg(args.config, loop=False), scans)
+    off_snaps, _, eng_off = _run(_loop_cfg(args.config, loop=False), scans)
     print("loop OFF done")
-    on_snaps, eng_on = _run(_loop_cfg(args.config, loop=True), scans)
+    on_snaps, on_edges, eng_on = _run(_loop_cfg(args.config, loop=True), scans)
     print(f"loop ON done; loop edges={len(eng_on._loop_edges)}")
 
     # preprocessed sensor-frame points are identical for both runs
@@ -86,6 +88,7 @@ def _build_cache(args) -> dict:
         "pts": pts,
         "off": packs(off_snaps),
         "on": packs(on_snaps),
+        "on_edges": on_edges,
         "n_loop_edges": len(eng_on._loop_edges),
     }
 
@@ -116,6 +119,8 @@ def main() -> None:
 
     pts = [p[:: args.point_stride] for p in data["pts"]]
     off, on = data["off"], data["on"]
+    on_edges = data.get("on_edges", [[] for _ in off])
+    edge_sets = [set(map(tuple, e)) for e in on_edges]
     n = len(pts)
     print(f"render n={n}, loop edges={data['n_loop_edges']}")
 
@@ -137,6 +142,7 @@ def main() -> None:
 
     fig, (axl, axr) = plt.subplots(1, 2, figsize=(12, 6), dpi=100)
     fig.patch.set_facecolor("#0b1220")
+    flash = max(1, int(round(args.fps * 0.6)))  # frames a freshly-fired edge stays bright
 
     def style(ax, title, color):
         ax.set_facecolor("#0b1220")
@@ -145,27 +151,44 @@ def main() -> None:
         ax.set_aspect("equal")
         ax.set_xlim(cx - r, cx + r)
         ax.set_ylim(cy - r, cy + r)
-        ax.set_title(title, color=color, fontsize=13)
+        ax.set_title(title, color=color, fontsize=14, pad=10)
 
     frames = list(range(0, n, args.frame_stride))
     if frames[-1] != n - 1:
         frames.append(n - 1)
-    frames += [n - 1] * args.fps
+    frames += [n - 1] * (args.fps * 2)  # hold on the final corrected map
 
     def draw(k):
         axl.clear()
         axr.clear()
-        style(axl, "loop closure OFF (drifts, walls smear)", "#f87171")
-        style(axr, "loop closure ON (drift corrected)", "#60a5fa")
+        style(axl, "loop closure OFF", "#f87171")
+        style(axr, "loop closure ON", "#60a5fa")
         for ax, pack, pcol, lcol in ((axl, off, "#fca5a5", "#f87171"), (axr, on, "#93c5fd", "#60a5fa")):
             wp = world_pts(pack, k)
             if wp.size:
-                ax.scatter(wp[:, 0], wp[:, 1], s=0.5, c=pcol, alpha=0.3, linewidths=0)
+                ax.scatter(wp[:, 0], wp[:, 1], s=0.5, c=pcol, alpha=0.28, linewidths=0)
             P = pack[k]
             tx, ty = P[: k + 1, 0], P[: k + 1, 1]
-            ax.plot(tx, ty, "-", color=lcol, lw=1.3)
+            ax.plot(tx, ty, "-", color=lcol, lw=1.2, alpha=0.9)
             if len(tx):
                 ax.plot(tx[-1], ty[-1], "o", color="#fde047", ms=6)
+
+        # ON panel: draw every loop-closure constraint; flash the ones just fired
+        snap = on[k]
+        cur = edge_sets[k]
+        recent = cur - edge_sets[max(0, k - flash)]
+        for i, j in cur:
+            if i < snap.shape[0] and j < snap.shape[0]:
+                xs = [float(snap[i, 0]), float(snap[j, 0])]
+                ys = [float(snap[i, 1]), float(snap[j, 1])]
+                if (i, j) in recent:
+                    axr.plot(xs, ys, "-", color="#fde047", lw=1.6, alpha=0.95)
+                else:
+                    axr.plot(xs, ys, "-", color="#34d399", lw=0.5, alpha=0.35)
+        axr.text(
+            0.03, 0.97, f"loop closures: {len(cur)}", transform=axr.transAxes,
+            color="#34d399", fontsize=12, va="top", ha="left",
+        )
         return []
 
     anim = FuncAnimation(fig, draw, frames=frames, interval=1000 / args.fps, blit=False)
