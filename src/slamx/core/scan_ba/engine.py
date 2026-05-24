@@ -81,6 +81,18 @@ class ScanBaEngine:
         self.graph = PoseGraph(cfg=PoseGraphConfig(max_iterations=50))
         self._tsdf = Tsdf2D.zeros(self.cfg.tsdf)
         self._window_solver = self._resolve_window_solver()
+        # Device-resident local map: when the GPU path is active, keep phi/weight on
+        # the device across the per-scan rebuild + window solve so there is no host
+        # upload each scan. _scans_dev mirrors _scans as (N,2) float64 device arrays.
+        self._cuda_active = self._window_solver is not optimize_window
+        self._scans_dev: list = []
+        if self._cuda_active:
+            from slamx.core.scan_ba import cuda
+
+            self._cuda = cuda
+            self._cp = cuda._cupy()
+            self._phi_d = self._cp.zeros((self._tsdf.height, self._tsdf.width), dtype=self._cp.float32)
+            self._weight_d = self._cp.zeros_like(self._phi_d)
 
     def _resolve_window_solver(self):
         """Pick the window LM backend: GPU fused kernel when requested+available,
@@ -127,6 +139,12 @@ class ScanBaEngine:
             return prediction
         return pose
 
+    def _store_scan(self, pts: np.ndarray) -> None:
+        """Append a preprocessed scan, mirroring it to the device when GPU-active."""
+        self._scans.append(pts)
+        if self._cuda_active:
+            self._scans_dev.append(self._cp.asarray(pts, dtype=self._cp.float64))
+
     def _rebuild_local_map(self, count: int) -> None:
         """Rebuild the active TSDF from the most recent `map_window` historical scans.
 
@@ -135,10 +153,24 @@ class ScanBaEngine:
         `count` is the number of stored scans to treat as history (excludes the
         scan currently being aligned).
         """
-        self._tsdf.phi[:] = 0.0
-        self._tsdf.weight[:] = 0.0
         mw = max(1, int(self.cfg.map_window))
         start = max(0, count - mw)
+        if self._cuda_active:
+            self._phi_d[:] = 0.0
+            self._weight_d[:] = 0.0
+            for i in range(start, count):
+                self._cuda.update_tsdf_from_scan_cuda(
+                    self._phi_d,
+                    self._weight_d,
+                    cfg=self.cfg.tsdf,
+                    pose=self.graph.poses[i],
+                    pts_d=self._scans_dev[i],
+                    weight_inc=self.cfg.tsdf_weight_inc,
+                    weight_max=self.cfg.tsdf_weight_max,
+                )
+            return
+        self._tsdf.phi[:] = 0.0
+        self._tsdf.weight[:] = 0.0
         for i in range(start, count):
             update_tsdf_from_scan(
                 self._tsdf,
@@ -155,7 +187,7 @@ class ScanBaEngine:
         if not self.graph.poses:
             init = Pose2(0.0, 0.0, 0.0)
             self.graph.poses.append(init)
-            self._scans.append(pts)
+            self._store_scan(pts)
             self._stamps.append(scan.stamp_ns)
             self._emit(0, init, score=0.0)
             return init
@@ -167,6 +199,10 @@ class ScanBaEngine:
 
         n_pts = int(pts.shape[0])
         if n_hist < self.cfg.seed_scans:
+            if self._cuda_active:
+                # bootstrap aligns a single scan on the CPU; mirror the device map down
+                self._tsdf.phi[:] = self._cp.asnumpy(self._phi_d)
+                self._tsdf.weight[:] = self._cp.asnumpy(self._weight_d)
             res = align_scan_to_tsdf(
                 tsdf=self._tsdf,
                 scan_xy=pts,
@@ -203,12 +239,22 @@ class ScanBaEngine:
                 motion_priors=motion_priors,
                 anchor=anchor,
             )
-            res = self._window_solver(
-                tsdf=self._tsdf,
-                state=state,
-                max_iters=self.cfg.optimize_max_iters,
-                huber_delta_m=self.cfg.huber_delta_m,
-            )
+            if self._cuda_active:
+                res = self._window_solver(
+                    tsdf=self._tsdf,
+                    state=state,
+                    max_iters=self.cfg.optimize_max_iters,
+                    huber_delta_m=self.cfg.huber_delta_m,
+                    phi_dev=self._phi_d,
+                    weight_dev=self._weight_d,
+                )
+            else:
+                res = self._window_solver(
+                    tsdf=self._tsdf,
+                    state=state,
+                    max_iters=self.cfg.optimize_max_iters,
+                    huber_delta_m=self.cfg.huber_delta_m,
+                )
             new_inliers = res.diagnostics.get("inliers_per_scan", [n_pts])[-1]
             gated = self._gate(res.state.poses[-1], prediction, new_inliers, n_pts)
             if gated is res.state.poses[-1]:
@@ -222,7 +268,7 @@ class ScanBaEngine:
         self._last_rel = rel
         node = self.graph.add_pose(pose)
         self.graph.add_edge(Edge(i=node - 1, j=node, rel=rel))
-        self._scans.append(pts)
+        self._store_scan(pts)
         self._stamps.append(scan.stamp_ns)
         self._emit(node, pose, score=score)
 
