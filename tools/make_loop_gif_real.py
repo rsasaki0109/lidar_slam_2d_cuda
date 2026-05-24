@@ -101,9 +101,9 @@ def main() -> None:
     ap.add_argument("--max-scans", type=int, default=300)
     ap.add_argument("--cache", required=True, type=Path)
     ap.add_argument("--out", required=True, type=Path)
-    ap.add_argument("--point-stride", type=int, default=3)
-    ap.add_argument("--frame-stride", type=int, default=2)
-    ap.add_argument("--fps", type=int, default=20)
+    ap.add_argument("--point-stride", type=int, default=2)
+    ap.add_argument("--frame-stride", type=int, default=4)
+    ap.add_argument("--fps", type=int, default=30)
     args = ap.parse_args()
 
     if args.cache.exists():
@@ -135,43 +135,56 @@ def main() -> None:
                 parts.append(transform_points_xy(T, pts[i].astype(np.float64)))
         return np.concatenate(parts) if parts else np.zeros((0, 2))
 
-    # shared view from the loop-ON final extent
+    # tight shared view: fit the union of both runs' full extent (OFF drifts wider) with
+    # a small margin, so the map fills the panels instead of floating in dark space.
     allp = np.concatenate([world_pts(on, n - 1), world_pts(off, n - 1)])
-    cx, cy = allp[:, 0].mean(), allp[:, 1].mean()
-    r = max(np.ptp(allp[:, 0]), np.ptp(allp[:, 1])) * 0.6 + 2.0
+    margin = 1.2
+    x0, x1 = allp[:, 0].min() - margin, allp[:, 0].max() + margin
+    y0 = allp[:, 1].min() - margin
+    y1 = allp[:, 1].max() + margin * 2.4  # extra headroom so titles clear the map
+    W, H = x1 - x0, y1 - y0
 
-    fig, (axl, axr) = plt.subplots(1, 2, figsize=(12, 6), dpi=100)
+    # size the figure to the map aspect so equal-aspect panels fill it (no letterboxing).
+    # side-by-side OFF | ON (landscape, consistent with the demo GIF above it).
+    panel_h = 4.6
+    panel_w = panel_h * (W / H)
+    fig, (axl, axr) = plt.subplots(1, 2, figsize=(panel_w * 2 + 0.4, panel_h), dpi=125)
     fig.patch.set_facecolor("#0b1220")
-    flash = max(1, int(round(args.fps * 0.6)))  # frames a freshly-fired edge stays bright
+    fig.subplots_adjust(left=0.0, right=1.0, top=1.0, bottom=0.0, wspace=0.03)
+    flash = max(1, int(round(args.fps * 0.5)))  # frames a freshly-fired edge stays bright
 
     def style(ax, title, color):
         ax.set_facecolor("#0b1220")
         ax.set_xticks([])
         ax.set_yticks([])
         ax.set_aspect("equal")
-        ax.set_xlim(cx - r, cx + r)
-        ax.set_ylim(cy - r, cy + r)
-        ax.set_title(title, color=color, fontsize=14, pad=10)
+        ax.set_xlim(x0, x1)
+        ax.set_ylim(y0, y1)
+        for sp in ax.spines.values():
+            sp.set_color("#1e293b")
+        ax.text(0.012, 0.96, title, transform=ax.transAxes, color=color,
+                fontsize=13, fontweight="bold", va="top", ha="left")
 
     frames = list(range(0, n, args.frame_stride))
     if frames[-1] != n - 1:
         frames.append(n - 1)
-    frames += [n - 1] * (args.fps * 2)  # hold on the final corrected map
+    frames += [n - 1] * int(args.fps * 1.2)  # short hold on the final corrected map
 
     def draw(k):
         axl.clear()
         axr.clear()
         style(axl, "loop closure OFF", "#f87171")
         style(axr, "loop closure ON", "#60a5fa")
-        for ax, pack, pcol, lcol in ((axl, off, "#fca5a5", "#f87171"), (axr, on, "#93c5fd", "#60a5fa")):
+        for ax, pack, pcol, lcol in ((axl, off, "#fda4af", "#f87171"), (axr, on, "#7dd3fc", "#38bdf8")):
             wp = world_pts(pack, k)
             if wp.size:
-                ax.scatter(wp[:, 0], wp[:, 1], s=0.5, c=pcol, alpha=0.28, linewidths=0)
+                ax.scatter(wp[:, 0], wp[:, 1], s=1.1, c=pcol, alpha=0.45, linewidths=0)
             P = pack[k]
             tx, ty = P[: k + 1, 0], P[: k + 1, 1]
-            ax.plot(tx, ty, "-", color=lcol, lw=1.2, alpha=0.9)
+            ax.plot(tx, ty, "-", color=lcol, lw=1.6, alpha=0.95)
             if len(tx):
-                ax.plot(tx[-1], ty[-1], "o", color="#fde047", ms=6)
+                ax.plot(tx[-1], ty[-1], "o", color="#fde047", ms=7,
+                        markeredgecolor="#fff7cc", markeredgewidth=0.8)
 
         # ON panel: draw every loop-closure constraint; flash the ones just fired
         snap = on[k]
@@ -182,13 +195,14 @@ def main() -> None:
                 xs = [float(snap[i, 0]), float(snap[j, 0])]
                 ys = [float(snap[i, 1]), float(snap[j, 1])]
                 if (i, j) in recent:
-                    axr.plot(xs, ys, "-", color="#fde047", lw=1.6, alpha=0.95)
+                    axr.plot(xs, ys, "-", color="#fde047", lw=1.8, alpha=0.95)
                 else:
-                    axr.plot(xs, ys, "-", color="#34d399", lw=0.5, alpha=0.35)
-        axr.text(
-            0.03, 0.97, f"loop closures: {len(cur)}", transform=axr.transAxes,
-            color="#34d399", fontsize=12, va="top", ha="left",
-        )
+                    axr.plot(xs, ys, "-", color="#34d399", lw=0.6, alpha=0.4)
+        axr.text(0.988, 0.035, f"loop closures: {len(cur)}", transform=axr.transAxes,
+                 color="#34d399", fontsize=12, fontweight="bold", va="bottom", ha="right")
+        if recent:  # a constraint just fired this frame -> flash the snap (corner, off the map)
+            axr.text(0.988, 0.96, "SNAP", transform=axr.transAxes, color="#fde047",
+                     fontsize=18, fontweight="bold", va="top", ha="right", alpha=0.9)
         return []
 
     anim = FuncAnimation(fig, draw, frames=frames, interval=1000 / args.fps, blit=False)
