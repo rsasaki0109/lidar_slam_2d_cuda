@@ -253,9 +253,26 @@ joint が pose_only に勝つ源泉を切り分けるための調査。200 scan 
 - **(c) 緩ゲートでも結果は tight と完全同一（保険の出番が出てこない）**: 検出ゲートを緩めて（inlier 0.4→0.2 / rms 0.3→0.7 / corr 1.5→3.0）偽辺を滑り込ませ naive を崩そうとしたが、loop_naive_loose rmse **0.845** / max **1.331** / ループ辺 **506**、loop_robust_loose **0.848** / **1.306** / **506** — **tight ゲートとビット同一**（同じ 506 辺、同じ ATE）。つまりこのバッグでは束縛条件は受理ゲートではなく**候補生成＋align の綺麗さ**で、ゲートに余裕があり緩めても境界付近の偽辺が 1 本も湧かない。ロバスト最適化が守る「偽辺が滑り込む領域」がこのデータでは緩ゲートでも顕在化しない＝合成の敵対ケース以外で価値を示す機会がそもそも無い。
 - **結論**: 既定で残す価値はある（worst-case を僅かに改善＆悪化させない＝無料の保険）が、**この問題で精度を伸ばす本丸は検出側**であってロバスト最適化ではない。次は受理ゲートでなく検出機構自体を狙う — 単発 align は `cur` 近傍の basin しか見ず、回転再訪で誤 basin に落ち（false negative）、自己相似な場所で「低 rms だが誤った確信マッチ」に固着する（false positive、rms/inlier ゲートでは捕まらない）。**P-loop2 = 複数 yaw 初期値掃引＋幾何検証**（別 basin の次点が僅差なら曖昧として棄却）でこの確信誤マッチを源流で潰す。
 
-### P-loop2 検出側頑健化 (2026-05-26): 単発 align → 複数初期値＋幾何検証
+### P-loop2 検出側頑健化 (2026-05-26): 単発 align → 複数初期値＋幾何検証（機構は正しいが整地バッグでは片利き、既定 OFF）
 
-`_try_loop_closure` の単発 align（`pose_init=cur`）を、距離候補ごとに複数 yaw 初期値で align → 別 basin の収束解を収集 → 「明確な勝者が 1 つあるとき」だけ受理、に拡張（`_align_loop_candidate`）。config: `loop_init_yaw_offsets_rad`（既定 `(0.0,)` = 単発 = 旧挙動）、`loop_ambiguity_margin`（>0 で幾何検証 ON、別姿勢の次点が `best_rms*(1+margin)` 未満なら曖昧として棄却）、`loop_solution_sep_m`（同 basin 一致 vs 別 basin 競合の閾、既定 0.5 m）。**既定値で旧コードとビット一致**（offset (0.0,)・margin 0 → 単発 inlier/rms/corr ゲートそのまま）。CLI 配線済み。狙うのは (b)(c) で示した「検出ゲートでは捕まらない確信誤マッチ」で、ロバスト最適化（受理後の保険）の手前で源流を断つ。
+`_try_loop_closure` の単発 align（`pose_init=cur`）を、距離候補ごとに複数 yaw 初期値で align → 別 basin の収束解を収集 → 「明確な勝者が 1 つあるとき」だけ受理、に拡張（`_align_loop_candidate`）。config: `loop_init_yaw_offsets_rad`（既定 `(0.0,)` = 単発 = 旧挙動）、`loop_ambiguity_margin`（>0 で幾何検証 ON、別姿勢の次点が `best_rms*(1+margin)` 未満なら曖昧として棄却）、`loop_solution_sep_m`（同 basin 一致 vs 別 basin 競合の閾、既定 0.5 m）。**既定値で旧コードとビット一致**（offset (0.0,)・margin 0 → 単発 inlier/rms/corr ゲートそのまま）。CLI 配線済み。曖昧判定は純関数 `_loop_match_ambiguous` に分離（単体テスト可能）。狙うのは (b)(c) で示した「検出ゲートでは捕まらない確信誤マッチ」で、ロバスト最適化（受理後の保険）の手前で源流を断つ。
+
+**単体テスト（決定的）**: `_loop_match_ambiguous` 4 ケース＋L字部屋（回転対称なし）で「掃引が 143° 回転再訪を回復し単発は取りこぼす」＋既定オフセットの単発ビット一致。機構そのものは正しく動く。
+
+**実バッグ定量 (1300 scan, sweep offsets {0,±90°,180°}, margin 0.3)** — `eval_loop_closure.py` の検出側変種で測定：
+
+| 候補生成 | 変種 | rmse | max | ループ辺 |
+|---|---|---|---|---|
+| tight (2.5m) | loop_robust（単発・出荷） | **0.848** | **1.306** | 506 |
+| tight | loop_multiinit_noverify（掃引のみ） | **0.828** | 1.780 | 497 |
+| tight | loop_multiinit（掃引＋検証） | 0.863 | 1.457 | 494 |
+| wide (5.0m) | loop_robust_widecand | 0.848 | 1.306 | 506 |
+| wide | loop_multiinit_widecand | 0.863 | 1.457 | 494 |
+
+- **(d) 候補拡張は単発で完全 no-op**: `loop_dist_m` 2.5→5.0 でも loop_robust_widecand は tight とビット同一（506/0.848/1.306）。広候補でも align が遠ノードを受理しない＝このバッグは検出側ストレス試験すら**ストレスにならない**ほど整地されている。多初期値版も tight/wide で同一（494/0.863/1.457）。
+- **(e) 掃引は no-op ではなく片利き**: 掃引のみ（noverify）で rmse 0.848→**0.828（−2.4%, 全変種で最良）** だが max 1.306→**1.780（+36%, 最悪）**＆辺 506→497。掃引が一部候補で「inlier 少・低 rms の別 basin」を拾い、平均適合は良化するが corr ゲートで良辺を 9 本落とし worst-case 外れ値を 1 本作る。原因は **rms-over-inlier 選択が少 inlier・低 rms 解を過剰選好**する点（選択指標を inlier 数で重み付けすれば緩和余地、将来課題）。
+- **(f) 検証は worst-case を戻すが rmse を犠牲に**: 掃引のみ→＋検証で max 1.780→**1.457（改善）**・辺 497→494（曖昧 3 本棄却で (e) の外れ値を除去）だが rmse 0.828→0.863（良辺も巻き込み悪化）。
+- **結論: 既定 OFF で出荷（旧挙動ビット一致）。** どの部品もこのクリーンなバッグで rmse↔max の片利きで、バランス最良は依然**単発 loop_robust (0.848/1.306)**。#11 ロバスト最適化・#12 緩ゲート・#7 marginalization と**通算 4 回連続の同一構図**＝「整地された Cartographer backpack_2d には防御機構の敵がいない」。**メタ結論: 頑健化系（多初期値・幾何検証・ロバスト核・marginalization）の価値実証にはこのバッグは整地され過ぎており、敵対的/曖昧なデータセットが要る。** 機構は単体テスト済で、曖昧環境・積極的候補生成向けの道具として温存。
 
 ### P2 ベンチ所見 (2026-05-24, GPU, cupy 14.1, CUDA 12.0)
 
