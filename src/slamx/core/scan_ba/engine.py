@@ -15,6 +15,30 @@ from slamx.core.scan_ba.window import AnchorPrior, MotionPrior, WindowState, opt
 from slamx.core.types import LaserScan, Pose2
 
 
+def _loop_match_ambiguous(
+    solutions: list[tuple[float, Pose2]], *, sep_m: float, margin: float
+) -> bool:
+    """A loop match is geometrically ambiguous when a *different basin* aligns nearly
+    as well as the winner. `solutions` is (rms, pose) for each init, best rms first.
+
+    Two solutions are the same basin (agreement, not ambiguity) when their poses are
+    within `sep_m`; beyond it they are rivals. A rival counts as a genuine competitor
+    when its rms is within the winner's by the relative `margin`
+    (rival_rms < best_rms * (1 + margin)). This catches self-similar places (a corridor
+    that registers equally well at several offsets) that the rms/inlier gates pass --
+    a strong fit alone does not prove it is the *right* place. Translational (xy) rivals
+    only; pure-rotation ambiguity in a circular room is out of scope.
+    """
+    if margin <= 0.0 or len(solutions) < 2:
+        return False
+    best_rms, best_pose = solutions[0]
+    for rms_o, pose_o in solutions[1:]:
+        far = float(np.hypot(pose_o.x - best_pose.x, pose_o.y - best_pose.y)) > sep_m
+        if far and rms_o < best_rms * (1.0 + margin):
+            return True
+    return False
+
+
 @dataclass
 class ScanBaEngineConfig:
     preprocess: PreprocessConfig = field(default_factory=PreprocessConfig)
@@ -65,6 +89,21 @@ class ScanBaEngineConfig:
     # enters at weight 1.0, equal to trusted odometry (the pre-P-loop behaviour). Kept as
     # a flag so the robust formulation can be A/B'd against the old plain solve.
     loop_edge_weighting: bool = True
+    # Detection-side robustness (P-loop2): the real precision lever once the optimizer
+    # is robust. A single LM align from the current odometry pose only finds the basin
+    # nearest `cur` -- a rotated revisit lands in a wrong minimum (false negative) and a
+    # self-similar place (corridor) can lock onto a spurious but low-rms match (false
+    # positive). Sweep several yaw inits, keep the distinct converged solutions, and
+    # accept only when one clearly wins. Default (0.0,) = single init = old behaviour.
+    loop_init_yaw_offsets_rad: tuple[float, ...] = (0.0,)
+    # Geometric verification: reject the best match when a *different* converged pose
+    # aligns nearly as well (ambiguous match, e.g. repetitive structure). The runner-up
+    # must be worse by this relative rms margin to accept (runner_rms >= best_rms *
+    # (1 + margin)). 0 disables the check (no verification).
+    loop_ambiguity_margin: float = 0.0
+    # Two converged solutions count as the same basin (agreement, not ambiguity) when
+    # their poses are within this distance; beyond it they are rival candidates.
+    loop_solution_sep_m: float = 0.5
     # Run the fixed-lag window LM solve on the GPU (fused CUDA kernel, P2.5/P2.9).
     # Numerically identical to the CPU path; falls back to CPU if cupy/CUDA is absent.
     use_cuda: bool = False
@@ -444,34 +483,23 @@ class ScanBaEngine:
             if (j, node) in self._loop_edges:
                 continue
             verify_tsdf = self._build_submap_tsdf(j)
-            res = align_scan_to_tsdf(
-                tsdf=verify_tsdf,
-                scan_xy=pts,
-                pose_init=cur,
-                max_iters=self.cfg.optimize_max_iters,
-                huber_delta_m=self.cfg.huber_delta_m,
-            )
-            inl_ratio = (res.num_inliers / n_pts) if n_pts else 0.0
-            rms = float(np.sqrt(2.0 * res.final_cost / max(1, res.num_inliers)))
-            corr = float(np.hypot(res.pose.x - cur.x, res.pose.y - cur.y))
-            if (
-                inl_ratio >= self.cfg.loop_accept_inlier_ratio
-                and rms <= self.cfg.loop_accept_rms_m
-                and corr <= self.cfg.loop_max_correction_m
-            ):
-                rel = self.graph.poses[j].inverse().compose(res.pose)
-                # down-weight by match confidence so a borderline loop (just over the
-                # inlier gate) influences the solve less than a strong one; the robust
-                # kernel then clips any that still turn out inconsistent.
-                w = float(inl_ratio) if self.cfg.loop_edge_weighting else 1.0
-                self.graph.add_edge(Edge(i=j, j=node, rel=rel, weight=w))
-                self._loop_edges.add((j, node))
-                added = True
-                if self.telemetry:
-                    self.telemetry.emit(
-                        "loop_closure_accepted",
-                        {"node": node, "i": j, "inlier_ratio": inl_ratio, "rms": rms},
-                    )
+            match = self._align_loop_candidate(verify_tsdf, pts, cur, n_pts)
+            if match is None:
+                continue
+            pose, inl_ratio, rms = match
+            rel = self.graph.poses[j].inverse().compose(pose)
+            # down-weight by match confidence so a borderline loop (just over the
+            # inlier gate) influences the solve less than a strong one; the robust
+            # kernel then clips any that still turn out inconsistent.
+            w = float(inl_ratio) if self.cfg.loop_edge_weighting else 1.0
+            self.graph.add_edge(Edge(i=j, j=node, rel=rel, weight=w))
+            self._loop_edges.add((j, node))
+            added = True
+            if self.telemetry:
+                self.telemetry.emit(
+                    "loop_closure_accepted",
+                    {"node": node, "i": j, "inlier_ratio": inl_ratio, "rms": rms},
+                )
 
         if added:
             opt = self.graph.optimize()
@@ -482,6 +510,54 @@ class ScanBaEngine:
             # corrected poses so it does not bake in the pre-closure drift.
             if self._global_map is not None:
                 self._global_map.rebuild(list(self.graph.poses), self._scans)
+
+    def _align_loop_candidate(
+        self, verify_tsdf: Tsdf2D, pts: np.ndarray, cur: Pose2, n_pts: int
+    ) -> tuple[Pose2, float, float] | None:
+        """Multi-init align of the current scan against a candidate's verify TSDF.
+
+        Aligns from several yaw inits (loop_init_yaw_offsets_rad) and keeps the distinct
+        converged solutions, then accepts only when one clearly wins. A confident loop
+        has a single dominant basin; if a *different* converged pose aligns nearly as
+        well (within loop_ambiguity_margin on rms) the place is geometrically ambiguous
+        -- e.g. a repetitive corridor -- and is rejected. Returns (pose, inlier_ratio,
+        rms) of the accepted match, or None. With offsets (0.0,) and margin 0 this is the
+        old single-init, inlier/rms/corr-gated behaviour, bit-for-bit.
+        """
+        sols: list[tuple[float, float, float, Pose2]] = []  # (rms, inlier_ratio, corr, pose)
+        for dtheta in self.cfg.loop_init_yaw_offsets_rad:
+            init = Pose2(cur.x, cur.y, cur.theta + float(dtheta))
+            res = align_scan_to_tsdf(
+                tsdf=verify_tsdf,
+                scan_xy=pts,
+                pose_init=init,
+                max_iters=self.cfg.optimize_max_iters,
+                huber_delta_m=self.cfg.huber_delta_m,
+            )
+            inl = (res.num_inliers / n_pts) if n_pts else 0.0
+            rms = float(np.sqrt(2.0 * res.final_cost / max(1, res.num_inliers)))
+            corr = float(np.hypot(res.pose.x - cur.x, res.pose.y - cur.y))
+            sols.append((rms, inl, corr, res.pose))
+        # solutions clearing the inlier gate, best (lowest) rms first
+        passing = sorted(
+            (s for s in sols if s[1] >= self.cfg.loop_accept_inlier_ratio), key=lambda s: s[0]
+        )
+        if not passing:
+            return None
+        best_rms, best_inl, best_corr, best_pose = passing[0]
+        # geometric verification: a rival pose (a different basin) aligning nearly as
+        # well makes the match ambiguous -> reject before it reaches the graph.
+        if _loop_match_ambiguous(
+            [(s[0], s[3]) for s in passing],
+            sep_m=self.cfg.loop_solution_sep_m,
+            margin=self.cfg.loop_ambiguity_margin,
+        ):
+            if self.telemetry:
+                self.telemetry.emit("loop_closure_ambiguous", {"best_rms": best_rms})
+            return None
+        if best_rms <= self.cfg.loop_accept_rms_m and best_corr <= self.cfg.loop_max_correction_m:
+            return (best_pose, best_inl, best_rms)
+        return None
 
     def _build_submap_tsdf(self, center: int) -> Tsdf2D:
         """Build a verification TSDF from scans near node `center` at their poses."""
