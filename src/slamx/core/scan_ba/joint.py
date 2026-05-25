@@ -42,6 +42,39 @@ class JointWindowResult:
     diagnostics: dict = field(default_factory=dict)
 
 
+_GPU_SPARSE = None
+
+
+def _gpu_sparse():
+    """Lazy (cupy, cupyx.scipy.sparse, cupyx.scipy.sparse.linalg) handles, cached."""
+    global _GPU_SPARSE
+    if _GPU_SPARSE is None:
+        import cupy as cp
+        import cupyx.scipy.sparse as csp
+        import cupyx.scipy.sparse.linalg as cspl
+
+        _GPU_SPARSE = (cp, csp, cspl)
+    return _GPU_SPARSE
+
+
+def _solve_step_gpu(Hxx_lm, Hxp, bx, rhs, pp_r, pp_c, pp_v, V, diagp, K):
+    """GPU Schur step: factorize the sparse SDF block H_phiphi on the device
+    (cuSOLVER via cupyx splu) and form the reduced pose system there. Numerically
+    identical to backend='schur'. Requires CUDA headers (set CUDA_PATH for JIT)."""
+    cp, csp, cspl = _gpu_sparse()
+    Hpp = csp.coo_matrix(
+        (cp.asarray(pp_v), (cp.asarray(pp_r), cp.asarray(pp_c))), shape=(V, V)
+    ).tocsc()
+    Hpp = Hpp + diagp * csp.identity(V, format="csc")
+    Y = cspl.splu(Hpp).solve(cp.asarray(rhs))  # (V, 3K+1)
+    Hxp_g = cp.asarray(Hxp)
+    YH, Yb = Y[:, : 3 * K], Y[:, 3 * K]
+    S = cp.asarray(Hxx_lm) - Hxp_g @ YH
+    dxx = cp.linalg.solve(S, -(cp.asarray(bx) - Hxp_g @ Yb))
+    dxp = -(Yb + YH @ dxx)
+    return cp.asnumpy(cp.concatenate([dxx, dxp]))
+
+
 def _bilinear_terms(tsdf: Tsdf2D, pts_w: np.ndarray):
     """For map-frame points, return per-point (r, grad, valid, neigh_flat, weights).
 
@@ -95,8 +128,9 @@ def optimize_window_joint(
     backend: str = "schur",
 ) -> JointWindowResult:
     """backend="schur" (default) eliminates the SDF block via a sparse Schur complement
-    (scales to large active-voxel counts); "dense" builds the full (3K+V) system. Both
-    give the same Gauss-Newton/LM step."""
+    (scales to large active-voxel counts); "dense" builds the full (3K+V) system;
+    "schur_gpu" runs the sparse Schur factorization on the GPU (cupyx splu / cuSOLVER).
+    All three give the same Gauss-Newton/LM step."""
     K = state.k
     phi0_full = tsdf.phi.copy()  # fold-time values; the SDF prior pins phi here
 
@@ -251,6 +285,8 @@ def optimize_window_joint(
         diagp = sdf_prior_info + lam
         pp_r, pp_c, pp_v = pp
         rhs = np.column_stack([Hxp.T, bp])  # (V, 3K+1) = [H_phix | b_phi]
+        if backend == "schur_gpu":
+            return _solve_step_gpu(Hxx_lm, Hxp, bx, rhs, pp_r, pp_c, pp_v, V, diagp, K)
         if backend == "dense":
             Hpp = np.zeros((V, V))
             if pp_v.size:
