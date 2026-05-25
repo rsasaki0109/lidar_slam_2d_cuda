@@ -224,6 +224,17 @@ P3.3 の 300 scan を倍に伸ばし、joint と marginalization の利得を大
 - **厳密 marginalization は実走行で利得なし（正直な負の結果）**: pose_only→marg は rmse +8%（0.184→0.198）・最悪 +10%、joint→joint_marg も rmse +6%（0.139→0.148）と、両軸でわずかに**悪化**。FEJ により理論的には情報整合性で優れるはずだが、この実バッグでは (a) 既存の強 anchor ヒューリスティックが既にほぼ最適、(b) FEJ がドリフト走行の初期線形化誤差を prior に焼き込んで硬直、(c) 固定ラグ窓が短く整合性の利得が小さい一方 FEJ の硬さが勝つ、が重なったと解釈。**安価な anchor が実データでは exact marginalization に勝つ** — 実装は正しい（テストで bit 一致を証明済み）が、この問題設定では使う動機が薄いという知見。
 - **per-scan コストは走行長でほぼ一定**: 600 scan で 907〜1133 ms/scan と、120 scan スモーク（855 ms/scan）から約 +13% に留まる。ループ閉じのポーズグラフ最適化（O(n)）と履歴増大による緩やかな成長で、破綻的な増加はない。joint は SDF 同時最適化分で pose_only 比 +17% 程度の上乗せ。
 
+### P-quality 所見 (2026-05-25): pose_only のコールドスタート誤差は一回限りの bootstrap 再最適化では消せない（正直な負の結果）
+
+joint が pose_only に勝つ源泉を切り分けるための調査。200 scan の ATE では pose_only rmse 0.183 / max 0.615 に対し **joint rmse 0.076 / max 0.165（−58%）** と差が大きく、誤差プロファイルを見ると pose_only の誤差は**最初の ~20 フレーム（疎な初期マップに対する registration）に集中**＝コールドスタート支配。
+
+- **仮説**: 初期ウィンドウ（n=window_size 到達時点）を一度だけ強 anchor + 全 scan で再最適化すれば、初期 pose がスパースマップの局所解から脱出して joint 級の ATE を回収できるのでは → `engine.cfg.bootstrap_refine` + `_bootstrap_refine()` を試作。
+- **結果はすべて完全な no-op（ATE が bit 一致）**。2 通り試した:
+  1. pose-only ウィンドウソルバで再最適化 → `refine=False/True` で rmse 0.183/max 0.615 がビット一致。
+  2. joint ソルバ（マップも同時 refine）で再最適化 → pose_only でも joint でも `refine=False/True` がビット一致（pose_only 0.183、joint 0.076 のまま不変）。
+- **根本原因**: (a) ウィンドウ成長中に pose は既に局所最適に達しており、同じ目的関数の再最適化は何も動かさない。(b) トラッカは P-map の方針どおり**毎スキャン ローカルサブマップを作り直す**ため、bootstrap で初期マップを幾ら refine しても次ステップで破棄される — pose_only のトラッキングマップは ephemeral。よって「マップ品質を上げてコールドスタートを救う」筋は、一回限りの介入では原理的に効かない。
+- **結論 / 推奨**: コールドスタート誤差はポーズ最適化不足ではなく**初期マップ品質**に起因し、それを解けるのは **joint の「窓内でマップと pose を毎反復 同時最適化」だけ**（bootstrap の一発ではなく継続的な co-refinement が必要）。安価な再最適化での緩和は不可。実データで精度が要るなら `use_joint=True` を使う、が素直な処方箋。試作した engine.py の `bootstrap_refine` 一式は revert（出荷しない）。
+
 ### P2 ベンチ所見 (2026-05-24, RTX 4070 Ti SUPER, cupy 14.1, CUDA 12.0)
 
 per-scan data-block (sample+Jacobian+JtWJ/JtWr) を cupy で実装、TSDF 常駐・30反復平均:
