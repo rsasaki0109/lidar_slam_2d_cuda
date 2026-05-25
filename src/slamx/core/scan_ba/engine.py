@@ -54,6 +54,13 @@ class ScanBaEngineConfig:
     # A total-cost threshold would scale with point count and never fire on real scans.
     loop_accept_rms_m: float = 0.3
     loop_max_correction_m: float = 1.5  # reject verify poses too far from odom prediction
+    # Robust pose-graph solve: the detection gates can still let a marginal/wrong loop
+    # edge through, and one bad edge in a plain L2 solve drags the whole trajectory. A
+    # redescending kernel down-weights such outliers at optimize time; loop edges are
+    # additionally weighted by their match confidence (inlier ratio) so a weak match
+    # counts for less than trusted odometry.
+    loop_robust_loss: str = "cauchy"
+    loop_robust_f_scale: float = 0.5
     # Run the fixed-lag window LM solve on the GPU (fused CUDA kernel, P2.5/P2.9).
     # Numerically identical to the CPU path; falls back to CPU if cupy/CUDA is absent.
     use_cuda: bool = False
@@ -103,7 +110,13 @@ class ScanBaEngine:
     _loop_edges: set[tuple[int, int]] = field(default_factory=set, repr=False)
 
     def __post_init__(self) -> None:
-        self.graph = PoseGraph(cfg=PoseGraphConfig(max_iterations=50))
+        self.graph = PoseGraph(
+            cfg=PoseGraphConfig(
+                max_iterations=50,
+                robust_loss=self.cfg.loop_robust_loss,
+                robust_f_scale=self.cfg.loop_robust_f_scale,
+            )
+        )
         self._tsdf = Tsdf2D.zeros(self.cfg.tsdf)
         self._window_solver = self._resolve_window_solver()
         # Joint mode runs the CPU joint solver and refines the SDF in-place; it is
@@ -443,7 +456,10 @@ class ScanBaEngine:
                 and corr <= self.cfg.loop_max_correction_m
             ):
                 rel = self.graph.poses[j].inverse().compose(res.pose)
-                self.graph.add_edge(Edge(i=j, j=node, rel=rel))
+                # down-weight by match confidence so a borderline loop (just over the
+                # inlier gate) influences the solve less than a strong one; the robust
+                # kernel then clips any that still turn out inconsistent.
+                self.graph.add_edge(Edge(i=j, j=node, rel=rel, weight=float(inl_ratio)))
                 self._loop_edges.add((j, node))
                 added = True
                 if self.telemetry:

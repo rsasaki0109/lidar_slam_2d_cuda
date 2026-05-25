@@ -19,6 +19,9 @@ class Edge:
     j: int
     # relative pose rel such that T_j ≈ T_i.compose(rel)
     rel: Pose2
+    # sqrt-information scale applied to this edge's residual. Lets uncertain loop
+    # edges count for less than trusted odometry; defaults to 1.0 (unweighted).
+    weight: float = 1.0
 
 
 @dataclass
@@ -27,6 +30,14 @@ class PoseGraphConfig:
     # Without a cap this grows ~O(n^2) as odometry chains lengthen, stalling long replays.
     max_iterations: int = 50
     max_nfev_cap: int | None = None
+    # Robust kernel for the least-squares solve (scipy `least_squares` loss). With a
+    # redescending loss ("cauchy"/"huber"/"soft_l1"), a single false-positive loop edge
+    # is down-weighted instead of dragging the whole trajectory. "linear" = plain L2
+    # (default, keeps the solve bit-identical to the unweighted formulation).
+    robust_loss: str = "linear"
+    # Residual magnitude (mixed m / rad) beyond which an edge starts being treated as an
+    # outlier. Only used when robust_loss != "linear".
+    robust_f_scale: float = 1.0
 
 
 @dataclass
@@ -61,6 +72,11 @@ class PoseGraph:
         ei = np.array([e.i for e in self.edges], dtype=np.intp)
         ej = np.array([e.j for e in self.edges], dtype=np.intp)
         rel = np.array([[e.rel.x, e.rel.y, e.rel.theta] for e in self.edges], dtype=np.float64)
+        # per-edge sqrt-information, broadcast to the 3 residual rows of each edge so it
+        # left-multiplies both the residual and the Jacobian (the (E,3) residual flattens
+        # row-major to [e0x,e0y,e0th,e1x,...], matching np.repeat(weights, 3)).
+        weights = np.array([e.weight for e in self.edges], dtype=np.float64)
+        w_rows = np.repeat(weights, 3)
         n_poses = len(self.poses)
         n_edges = len(self.edges)
 
@@ -136,7 +152,7 @@ class PoseGraph:
             res[:, 0] = pred_x - rel[:, 0]
             res[:, 1] = pred_y - rel[:, 1]
             res[:, 2] = np.arctan2(np.sin(pred_th - rel[:, 2]), np.cos(pred_th - rel[:, 2]))
-            return res.reshape(-1)
+            return res.reshape(-1) * w_rows
 
         def jacobian(uv: np.ndarray):
             P = _poses_from_state(uv)
@@ -194,8 +210,10 @@ class PoseGraph:
             if not data_parts:
                 return coo_matrix((n_edges * 3, free_vars), dtype=np.float64).tocsr()
 
+            j_rows = np.concatenate(row_parts)
+            j_data = np.concatenate(data_parts) * w_rows[j_rows]
             return coo_matrix(
-                (np.concatenate(data_parts), (np.concatenate(row_parts), np.concatenate(col_parts))),
+                (j_data, (j_rows, np.concatenate(col_parts))),
                 shape=(n_edges * 3, free_vars),
             ).tocsr()
 
@@ -216,6 +234,8 @@ class PoseGraph:
             method="trf",
             max_nfev=max_nfev,
             x_scale="jac",
+            loss=self.cfg.robust_loss,
+            f_scale=self.cfg.robust_f_scale,
         )
         xf = r.x.reshape(-1, 3)
         self.poses = [Pose2(float(anchor[0]), float(anchor[1]), float(anchor[2]))] + [

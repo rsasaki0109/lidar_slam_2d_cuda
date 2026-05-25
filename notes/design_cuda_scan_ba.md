@@ -235,6 +235,15 @@ joint が pose_only に勝つ源泉を切り分けるための調査。200 scan 
 - **根本原因**: (a) ウィンドウ成長中に pose は既に局所最適に達しており、同じ目的関数の再最適化は何も動かさない。(b) トラッカは P-map の方針どおり**毎スキャン ローカルサブマップを作り直す**ため、bootstrap で初期マップを幾ら refine しても次ステップで破棄される — pose_only のトラッキングマップは ephemeral。よって「マップ品質を上げてコールドスタートを救う」筋は、一回限りの介入では原理的に効かない。
 - **結論 / 推奨**: コールドスタート誤差はポーズ最適化不足ではなく**初期マップ品質**に起因し、それを解けるのは **joint の「窓内でマップと pose を毎反復 同時最適化」だけ**（bootstrap の一発ではなく継続的な co-refinement が必要）。安価な再最適化での緩和は不可。実データで精度が要るなら `use_joint=True` を使う、が素直な処方箋。試作した engine.py の `bootstrap_refine` 一式は revert（出荷しない）。
 
+### P-loop 所見 (2026-05-26): ループ閉じ込みのロバスト化 — 辺重み + ロバストカーネル
+
+既存のループ閉じ込みは「距離ベース候補 → サブマップ TSDF へ単発 align → inlier/rms/corr の 3 ゲート → エッジ追加 → 全体 pose-graph solve」。**最適化側が無防備**だった: `PoseGraph` の全辺が等重みの素の L2 で解かれ（情報量も重みも無し）、ロバストカーネルも無い。検出ゲートをすり抜けた誤検出ループ辺が 1 本でも入ると、軌跡全体が引きずられて壊れる（古典的な単発 false-positive 問題）。
+
+- **実装**: `Edge.weight`（辺ごとの sqrt-information、既定 1.0）と `PoseGraphConfig.robust_loss`/`robust_f_scale` を追加。`optimize()` で残差・ヤコビアンに辺重みを左から掛け（`(E,3)` を行優先で平坦化し `np.repeat(weights,3)` でブロードキャスト）、`scipy.least_squares` に `loss`/`f_scale` を渡す。**既定は `weight=1.0` + `loss="linear"` で従来と bit 一致**（後方互換、既存テストそのまま green）。
+- **engine 配線**: `ScanBaEngineConfig.loop_robust_loss="cauchy"` / `loop_robust_f_scale=0.5` を既定とし `PoseGraph` へ渡す。**ループ辺は `weight=inlier_ratio`** で重み付け（ゲートぎりぎり 0.4 の弱い一致は信頼できるオドメトリ 1.0 より効きを下げる）、オドメトリ辺は 1.0。二段構え＝「弱い辺は最初から軽く、それでも不整合な辺はカーネルがクリップ」。
+- **f_scale=0.5 の根拠**: 受理ループ辺の残差は rms ゲート ≤0.3 m。f_scale=0.5 なら良辺（rms≤0.3）は cauchy のほぼ二次域（z≤0.36, weight≥0.73）に残しつつ、メートル級にずれた粗大外れ値だけを強く減衰。0.3 まで下げると良辺も削り始めるので不可。
+- **定量（単発の粗大偽辺ストレステスト, 6 pose ループ + 完全オドメトリ + 真ループ辺、偽辺が pose3≡pose0 を主張）**: 最大軌跡偏差 = **素の L2 で 1.87 m → 重み 0.4 + cauchy(0.5) で 0.31 m（約 6 倍改善）**。f_scale=0.3 なら 0.19 m。π フリップの極端な単発外れ値なので「真値完全復元」までは行かないが、軌跡破壊は確実に防げる。test_pose_graph に `test_robust_loss_rejects_false_loop_edge` / `test_edge_weight_down_weights_conflicting_edge` を追加（137 passed）。
+
 ### P2 ベンチ所見 (2026-05-24, GPU, cupy 14.1, CUDA 12.0)
 
 per-scan data-block (sample+Jacobian+JtWJ/JtWr) を cupy で実装、TSDF 常駐・30反復平均:
