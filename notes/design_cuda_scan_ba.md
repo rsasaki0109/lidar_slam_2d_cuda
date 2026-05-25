@@ -135,8 +135,33 @@ K=10、25 反復フル solve のベンチ (`tools/bench_scan_ba_cuda.py`):
 | 200,000  | 566 ms  | 221 ms  | 84.6 ms | 6.69x |
 
 - fused は bincount の **約 2.2x**、損益分岐が ~50k → ~15-20k 点へ低下、200k で 6.69x。
-- fused 時間は 2k で 29 ms・200k で 85 ms とほぼ一定 = データ項はもはやボトルネックでなく、**反復あたりの固定オーバーヘッド (30×30 `cp.linalg.solve` の launch・ブロック組み立て・motion prior の Python ループ) 律速**。実用 2D (2〜10k 点) で CPU を超えるには、この組み立て+solve も 1 つの kernel/グラフに畳む (CUDA graph capture or 全段 fused) のが次段 P2.9。
+- fused 時間は 2k で 29 ms・200k で 85 ms とほぼ一定 = データ項はもはやボトルネックでなく、**反復あたりの固定オーバーヘッド律速**。次段 P2.9 で内訳をプロファイルして潰す。
 - CPU と bincount フォールバックは維持 (`backend=` で選択)。
+
+### P2.9 所見 (2026-05-25): 反復オーバーヘッドのプロファイルと motion prior ベクトル化
+
+evaluate あたりの内訳を実測 (K=10, 2k 点):
+
+| 段 | 時間 |
+|----|------|
+| fused kernel + acc | 0.016 ms |
+| H/b 組み立て | 0.247 ms |
+| **motion prior Python ループ (K-1 反復)** | **1.764 ms** |
+| 30×30 `cp.linalg.solve` | 0.136 ms |
+| host cost sync | 0.051 ms |
+
+ボトルネックは solve でも CUDA graph 不在でもなく、**motion prior を 1 prior ずつ回す Python ループ (~50 個の極小カーネル launch)** だった。block-tridiagonal 構造を index 配列で一括 scatter する形にベクトル化 (対角ブロックは node ごとに左右 prior の W を加算、off-diagonal は distinct な (i,i+1) ペアへ一括) → ループ消滅。CPU と数値完全一致のまま:
+
+| window 点数 | CPU | bincount | fused | fused speedup |
+|-------------|------|----------|-------|---------------|
+| 2,000    | 11.2 ms | 33.4 ms | 10.4 ms | **1.07x** |
+| 10,000   | 16.6 ms | 32.6 ms |  9.8 ms | **1.70x** |
+| 50,000   | 180 ms  | 141 ms  |  38 ms | 4.74x |
+| 200,000  | 571 ms  | 176 ms  |  40 ms | 14.22x |
+
+- **損益分岐が 2k 点未満へ低下 = 実用 2D ウィンドウ (K=10 × 200〜1000 点) で GPU が CPU を上回る**。fused 時間は 10〜40 ms とほぼ一定で良く償却。
+- P2 (素朴 per-block port, 全域で負け) → P2.5 (on-device, ~50k 分岐) → P2.5c (fused kernel, ~15-20k) → P2.9 (assembly ベクトル化, <2k) と段階的に分岐点を下げ切った。
+- 残課題: 実 `replay` への `use_cuda` 統合、SDF 同時最適化 (P3)。教訓: 「GPU が遅い」の主因は素朴に思える small-op の Python ループ launch であり、custom kernel より先にプロファイルすべきだった。
 
 ## 9. オープン問題 / リスク
 

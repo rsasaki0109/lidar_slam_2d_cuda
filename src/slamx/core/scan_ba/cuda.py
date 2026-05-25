@@ -242,6 +242,14 @@ def optimize_window_cuda(
         mp_info = cp.asarray(
             [[m.info_xy, m.info_xy, m.info_theta] for m in state.motion_priors], dtype=cp.float64
         )
+        # motion priors form a block-tridiagonal addition to H/b. Precompute the flat
+        # off-diagonal-block indices so the whole prior assembles vectorised (the naive
+        # per-prior Python loop was the dominant per-iteration cost -- ~50 tiny launches).
+        _d3 = cp.arange(3, dtype=cp.int64)
+        _iar = cp.arange(K - 1, dtype=cp.int64)
+        mp_roff = (3 * _iar[:, None] + _d3[None, :]).reshape(-1)  # node i diagonal entries
+        mp_coff = (3 * (_iar + 1)[:, None] + _d3[None, :]).reshape(-1)  # node i+1
+        main_diag = cp.arange(n3, dtype=cp.int64)
     anchor = state.anchor
     if anchor is not None:
         anc_pose = cp.asarray([anchor.pose.x, anchor.pose.y, anchor.pose.theta], dtype=cp.float64)
@@ -323,17 +331,24 @@ def optimize_window_cuda(
             b[:] = bv.reshape(-1)
 
         if has_mp:
-            for i in range(K - 1):
-                Wd = mp_info[i]
-                ri = (P[i + 1] - P[i]) - mp_delta[i]
-                Wm = cp.diag(Wd)
-                H[3 * i : 3 * i + 3, 3 * i : 3 * i + 3] += Wm
-                H[3 * (i + 1) : 3 * (i + 1) + 3, 3 * (i + 1) : 3 * (i + 1) + 3] += Wm
-                H[3 * i : 3 * i + 3, 3 * (i + 1) : 3 * (i + 1) + 3] -= Wm
-                H[3 * (i + 1) : 3 * (i + 1) + 3, 3 * i : 3 * i + 3] -= Wm
-                b[3 * i : 3 * i + 3] += -Wd * ri
-                b[3 * (i + 1) : 3 * (i + 1) + 3] += Wd * ri
-                cost = cost + 0.5 * cp.sum(Wd * ri * ri)
+            # r_i = (P_{i+1} - P_i) - delta_i ; J_i = -I, J_{i+1} = +I, W diagonal.
+            ri = (P[1:] - P[:-1]) - mp_delta  # (K-1, 3)
+            wri = mp_info * ri  # (K-1, 3)
+            # diagonal blocks: node k gets W from prior k (left) and prior k-1 (right)
+            diag_w = cp.zeros((K, 3), dtype=cp.float64)
+            diag_w[: K - 1] += mp_info
+            diag_w[1:] += mp_info
+            H[main_diag, main_diag] += diag_w.reshape(-1)
+            # off-diagonal blocks (i, i+1) and its transpose: -W (diagonal-within-block)
+            off = (-mp_info).reshape(-1)
+            H[mp_roff, mp_coff] += off
+            H[mp_coff, mp_roff] += off
+            # b: node k gets -W*r from prior k (left) and +W*r from prior k-1 (right)
+            bc = cp.zeros((K, 3), dtype=cp.float64)
+            bc[: K - 1] += -wri
+            bc[1:] += wri
+            b += bc.reshape(-1)
+            cost = cost + 0.5 * cp.sum(mp_info * ri * ri)
 
         if anchor is not None:
             ri = P[0] - anc_pose
