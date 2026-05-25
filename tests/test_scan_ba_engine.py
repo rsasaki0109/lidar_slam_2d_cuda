@@ -270,6 +270,35 @@ def test_engine_marginalization_dispatch_from_config():
     assert eng._marg_active
 
 
+def test_engine_builds_persistent_global_map():
+    """With build_global_map on, the engine maintains a separate persistent global TSDF
+    that ends up observed, while the tracking submap (self._tsdf) stays the small local
+    map -- the two must not be the same object."""
+    gt = [Pose2(0.15 * i, 0.05 * i, 0.01 * i) for i in range(8)]
+    cfg = ScanBaEngineConfig(
+        tsdf=Tsdf2DConfig(resolution_m=0.05, origin_x_m=-5.0, origin_y_m=-5.0,
+                          size_x_m=14.0, size_y_m=14.0, truncation_m=0.5),
+        window_size=6, seed_scans=3, prediction_mode="constant_velocity",
+        build_global_map=True,
+        global_tsdf=Tsdf2DConfig(resolution_m=0.05, origin_x_m=-10.0, origin_y_m=-10.0,
+                                 size_x_m=24.0, size_y_m=24.0, truncation_m=0.5),
+    )
+    eng = ScanBaEngine(cfg=cfg)
+    for p in gt:
+        eng.handle_scan(_l_room_laserscan(p))
+
+    gm = eng.global_map
+    assert gm is not None
+    assert np.any(gm.tsdf.weight > 0)
+    # global map has its own (larger) grid, distinct from the local tracking map
+    assert gm.tsdf.phi.shape != eng._tsdf.phi.shape
+    # finalize rebuilds from final poses without error and keeps it observed
+    fm = eng.finalize_global_map()
+    assert fm is gm and np.any(fm.tsdf.weight > 0)
+    img = gm.to_occupancy_u8()
+    assert img.shape == gm.tsdf.phi.shape
+
+
 def test_engine_joint_dispatch_from_config():
     cfg = {
         "slam": {

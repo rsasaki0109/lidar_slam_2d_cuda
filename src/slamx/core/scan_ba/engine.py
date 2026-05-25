@@ -71,6 +71,17 @@ class ScanBaEngineConfig:
     # CPU or joint path -- the device-resident GPU map is not host-resident for the
     # linearization, so marginalization is disabled when use_cuda forces the GPU path.
     use_marginalization: bool = False
+    # Persistent global TSDF map (P-map): a single large map every accepted scan is
+    # folded into, kept separate from the throwaway local tracking submap. Rebuilt from
+    # corrected poses after each loop closure so it stays consistent with the optimized
+    # graph. Off by default (build_global_map). `global_tsdf` is its (larger) extent.
+    build_global_map: bool = False
+    global_tsdf: Tsdf2DConfig = field(
+        default_factory=lambda: Tsdf2DConfig(
+            resolution_m=0.05, origin_x_m=-30.0, origin_y_m=-30.0,
+            size_x_m=60.0, size_y_m=60.0, truncation_m=0.4,
+        )
+    )
 
 
 @dataclass
@@ -109,6 +120,16 @@ class ScanBaEngine:
         self._marg_active = self.cfg.use_marginalization and not self._cuda_active
         self._marg_prior = None
         self._marg_idx = -1
+        # Persistent global map (separate from the tracking submap); see GlobalTsdfMap.
+        self._global_map = None
+        if self.cfg.build_global_map:
+            from slamx.core.scan_ba.global_map import GlobalTsdfMap
+
+            self._global_map = GlobalTsdfMap(
+                self.cfg.global_tsdf,
+                weight_inc=self.cfg.tsdf_weight_inc,
+                weight_max=self.cfg.tsdf_weight_max,
+            )
         self._scans_dev: list = []
         if self._cuda_active:
             from slamx.core.scan_ba import cuda
@@ -153,6 +174,22 @@ class ScanBaEngine:
     @property
     def stamps_ns(self) -> list[int | None]:
         return list(self._stamps)
+
+    @property
+    def global_map(self):
+        """The persistent GlobalTsdfMap, or None when build_global_map is off."""
+        return self._global_map
+
+    def finalize_global_map(self):
+        """Rebuild the global map from the current (final) poses and return it.
+
+        Call after any final pose-graph optimization so the saved map reflects the
+        last optimized trajectory; a no-op (returns None) when the map is disabled.
+        """
+        if self._global_map is None:
+            return None
+        self._global_map.rebuild(list(self.graph.poses), self._scans)
+        return self._global_map
 
     def _predict(self) -> Pose2:
         last = self.graph.poses[-1]
@@ -224,6 +261,8 @@ class ScanBaEngine:
             self.graph.poses.append(init)
             self._store_scan(pts)
             self._stamps.append(scan.stamp_ns)
+            if self._global_map is not None:
+                self._global_map.integrate(init, pts)
             self._emit(0, init, score=0.0)
             return init
 
@@ -324,6 +363,8 @@ class ScanBaEngine:
         self._stamps.append(scan.stamp_ns)
         if self._marg_active:
             self._update_marginalization()
+        if self._global_map is not None:
+            self._global_map.integrate(pose, pts)
         self._emit(node, pose, score=score)
 
         if (
@@ -416,6 +457,10 @@ class ScanBaEngine:
             if self.telemetry:
                 self.telemetry.emit("optimization", {"node": node, **opt})
             self._last_rel = self.graph.poses[-2].inverse().compose(self.graph.poses[-1])
+            # the trajectory just moved: rebuild the persistent global map from the
+            # corrected poses so it does not bake in the pre-closure drift.
+            if self._global_map is not None:
+                self._global_map.rebuild(list(self.graph.poses), self._scans)
 
     def _build_submap_tsdf(self, center: int) -> Tsdf2D:
         """Build a verification TSDF from scans near node `center` at their poses."""
