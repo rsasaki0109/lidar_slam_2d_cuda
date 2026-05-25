@@ -1,12 +1,8 @@
 # lidar_slam_2d_cuda
 
-![dead reckoning vs scan-BA core](docs/assets/demo.gif)
+![slamx scan-BA online SLAM](docs/assets/online_slam.gif)
 
-*Left: scan-to-scan dead reckoning drifts. Right: the scan-level BA core stays consistent.*
-
-![loop closure off vs on](docs/assets/loop_closure_real.gif)
-
-*Loop closure on Google Cartographer `backpack_2d` (500 scans, 279 loop edges): without it the walls smear as drift accumulates (left); with it, each revisit (green edges) adds a pose-graph constraint that pulls the drift back and keeps the walls crisp (right).*
+*Online SLAM on Google Cartographer `backpack_2d` (1300 scans). The map is rebuilt live from the running pose estimates — the bright beam is the current scan; cyan is the accumulated map. Each revisit closes a pose-graph loop (759 total) and the solve **snaps** accumulated drift back into alignment, so the floor plan stays crisp instead of smearing.*
 
 2D LiDAR SLAM with a fixed-lag, **scan-level bundle-adjustment** core (CUDA-bound). ROS-free, CLI-first.
 
@@ -26,6 +22,14 @@ slamx replay <bag> --topic <scan_topic> --config configs/scan_ba_backpack_s300.y
 ## How it works
 
 Each scan is aligned against a TSDF rebuilt from a sliding window of recent scans (scan-to-local-map), then a fixed-lag window of poses is jointly optimized (Gauss-Newton / LM) with motion and anchor priors. Revisited places are detected against past nodes, verified by TSDF alignment, and closed with a global pose-graph solve. Code: `src/slamx/core/scan_ba/`. Design and roadmap: `notes/design_cuda_scan_ba.md`.
+
+![dead reckoning vs scan-BA core](docs/assets/demo.gif)
+
+*The scan-BA core alone (no loop closure): scan-to-scan dead reckoning drifts (left); the fixed-lag scan-level BA core stays consistent (right).*
+
+![loop closure off vs on](docs/assets/loop_closure_real.gif)
+
+*What loop closure adds (`backpack_2d`, 500 scans, 279 loop edges): without it the walls smear as drift accumulates (left); with it, each revisit (green edges) adds a pose-graph constraint that pulls the drift back and keeps the walls crisp (right).*
 
 ## GPU acceleration
 
