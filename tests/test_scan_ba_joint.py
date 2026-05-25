@@ -209,5 +209,57 @@ def test_joint_schur_gpu_matches_cpu():
     np.testing.assert_allclose(tg.phi, tc.phi, rtol=0, atol=1e-5)
 
 
+@pytest.mark.skipif(not _gpu_sparse_works(), reason="no CUDA device / cupy sparse / CUDA headers")
+def test_joint_full_gpu_matches_cpu():
+    """backend='gpu' runs the *entire* joint window solve on the device -- gather,
+    assemble (the H_xphi/b_phi scatter and the sparse H_phiphi COO), and the Schur
+    solve. It must reproduce the CPU sparse-Schur poses, cost, and refined map (the
+    same GN/LM step up to float reduction order)."""
+    cfg = _cfg()
+    gt = _gt()[:3]
+    scans = [_raycast_scan(p, n_beams=120) for p in gt]
+    base = _clean_map(cfg, gt, scans)
+    rng = np.random.default_rng(4)
+    m = base.weight > 0
+    noise = rng.normal(0.0, 0.05, size=int(m.sum())).astype(np.float32)
+
+    def state():
+        mps = [
+            MotionPrior(
+                delta_x=gt[i + 1].x - gt[i].x, delta_y=gt[i + 1].y - gt[i].y,
+                delta_theta=gt[i + 1].theta - gt[i].theta, info_xy=3.0, info_theta=3.0,
+            )
+            for i in range(len(gt) - 1)
+        ]
+        return WindowState(poses=list(gt), scans=scans, motion_priors=mps, anchor=AnchorPrior(pose=gt[0]))
+
+    tc = Tsdf2D(cfg=cfg, phi=base.phi.copy(), weight=base.weight.copy())
+    tc.phi[m] += noise
+    rc = optimize_window_joint(tsdf=tc, state=state(), max_iters=12, huber_delta_m=0.2, backend="schur")
+
+    tg = Tsdf2D(cfg=cfg, phi=base.phi.copy(), weight=base.weight.copy())
+    tg.phi[m] += noise
+    rg = optimize_window_joint(tsdf=tg, state=state(), max_iters=12, huber_delta_m=0.2, backend="gpu")
+
+    assert rg.diagnostics["backend"] == "gpu"
+    assert rc.num_active_voxels == rg.num_active_voxels
+    assert abs(rc.final_cost - rg.final_cost) < 1e-6
+    for a, b in zip(rc.state.poses, rg.state.poses):
+        np.testing.assert_allclose([b.x, b.y, b.theta], [a.x, a.y, a.theta], rtol=0, atol=1e-6)
+    np.testing.assert_allclose(tg.phi, tc.phi, rtol=0, atol=1e-4)
+
+
+def test_joint_gpu_rejects_smoothness():
+    """The GPU path does not implement the SDF smoothness regulariser; it must say so
+    rather than silently dropping the term."""
+    cfg = _cfg()
+    gt = _gt()[:2]
+    scans = [_raycast_scan(p, n_beams=40) for p in gt]
+    base = _clean_map(cfg, gt, scans)
+    st = WindowState(poses=list(gt), scans=scans, motion_priors=[], anchor=AnchorPrior(pose=gt[0]))
+    with pytest.raises(NotImplementedError):
+        optimize_window_joint(tsdf=base, state=st, max_iters=1, sdf_smooth_info=1.0, backend="gpu")
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
