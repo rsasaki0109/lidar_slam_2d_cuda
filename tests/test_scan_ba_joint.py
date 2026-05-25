@@ -79,6 +79,40 @@ def test_joint_refines_map_below_pose_only():
     assert dev < 0.1, f"pose deviation {dev:.4f} too large"
 
 
+def test_joint_schur_matches_dense():
+    """Sparse Schur elimination of the SDF block gives the same step as the dense
+    full (3K+V) solve. Few beams keep the dense path fast."""
+    cfg = _cfg()
+    gt = _gt()[:2]
+    scans = [_raycast_scan(p, n_beams=60) for p in gt]
+    base = _clean_map(cfg, gt, scans)
+    rng = np.random.default_rng(1)
+    m = base.weight > 0
+    noise = rng.normal(0.0, 0.04, size=int(m.sum())).astype(np.float32)
+
+    def state():
+        mps = [
+            MotionPrior(
+                delta_x=gt[1].x - gt[0].x, delta_y=gt[1].y - gt[0].y, delta_theta=gt[1].theta - gt[0].theta,
+                info_xy=3.0, info_theta=3.0,
+            )
+        ]
+        return WindowState(poses=list(gt), scans=scans, motion_priors=mps, anchor=AnchorPrior(pose=gt[0]))
+
+    td = Tsdf2D(cfg=cfg, phi=base.phi.copy(), weight=base.weight.copy())
+    td.phi[m] += noise
+    rd = optimize_window_joint(tsdf=td, state=state(), max_iters=10, huber_delta_m=0.2, backend="dense")
+
+    ts = Tsdf2D(cfg=cfg, phi=base.phi.copy(), weight=base.weight.copy())
+    ts.phi[m] += noise
+    rs = optimize_window_joint(tsdf=ts, state=state(), max_iters=10, huber_delta_m=0.2, backend="schur")
+
+    assert abs(rd.final_cost - rs.final_cost) < 1e-9
+    for a, b in zip(rd.state.poses, rs.state.poses):
+        np.testing.assert_allclose([b.x, b.y, b.theta], [a.x, a.y, a.theta], rtol=0, atol=1e-9)
+    np.testing.assert_allclose(ts.phi, td.phi, rtol=0, atol=1e-6)
+
+
 if __name__ == "__main__":
     import pytest
 
