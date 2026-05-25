@@ -86,6 +86,7 @@ def optimize_window_joint(
     max_iters: int = 20,
     huber_delta_m: float = 0.15,
     sdf_prior_info: float = 10.0,
+    sdf_smooth_info: float = 0.0,
     converge_dx_m: float = 1e-4,
     converge_dtheta_rad: float = 1e-5,
     lm_lambda_init: float = 1e-3,
@@ -208,6 +209,39 @@ def optimize_window_joint(
             cost += 0.5 * float(sdf_prior_info * np.sum(rp * rp))
         return cost
 
+    def smoothness(active_list, idx_of):
+        """SDF smoothness regulariser between adjacent active voxels: r = phi_u - phi_v.
+        Returns (cost, COO rows/cols/vals for H_phiphi, b_phi delta). Off by default."""
+        V = len(active_list)
+        empty = (0.0, np.zeros(0, np.int64), np.zeros(0, np.int64), np.zeros(0), np.zeros(V))
+        if sdf_smooth_info <= 0.0 or V < 2:
+            return empty
+        w = tsdf.width
+        us, nbs = [], []
+        for v in active_list:
+            if (v % w) != w - 1 and (v + 1) in idx_of:
+                us.append(idx_of[v]); nbs.append(idx_of[v + 1])
+            if (v + w) in idx_of:
+                us.append(idx_of[v]); nbs.append(idx_of[v + w])
+        if not us:
+            return empty
+        us = np.array(us, np.int64)
+        nbs = np.array(nbs, np.int64)
+        av = np.array(active_list, np.int64)
+        flat = tsdf.phi.ravel()
+        res = flat[av[us]] - flat[av[nbs]]
+        lam = float(sdf_smooth_info)
+        bp_delta = np.zeros(V)
+        np.add.at(bp_delta, us, lam * res)
+        np.add.at(bp_delta, nbs, -lam * res)
+        sr = np.concatenate([us, nbs, us, nbs])
+        sc = np.concatenate([us, nbs, nbs, us])
+        sv = np.concatenate([
+            np.full(us.size, lam), np.full(nbs.size, lam),
+            np.full(us.size, -lam), np.full(nbs.size, -lam),
+        ])
+        return 0.5 * lam * float(np.sum(res * res)), sr, sc, sv, bp_delta
+
     def solve_step(Hxx, Hxp, bx, bp, pp, V, lam):
         """One LM increment dx = [dx_pose (3K); dx_phi (V)] by Schur-eliminating the
         SDF block. H_phiphi = data + (sdf_prior_info + lam) I; H_xx damped by lam."""
@@ -232,7 +266,7 @@ def optimize_window_joint(
         dxp = -(Yb + YH @ dxx)
         return np.concatenate([dxx, dxp])
 
-    def total_cost():
+    def total_cost(active_list=None, idx_of=None):
         """Cost at the current poses/phi (data + priors), for accept/reject."""
         c = 0.0
         for t in range(K):
@@ -266,6 +300,8 @@ def optimize_window_joint(
         if av.size:
             rp = tsdf.phi.ravel()[av] - phi0_full.ravel()[av]
             c += 0.5 * float(sdf_prior_info * np.sum(rp * rp))
+        if active_list is not None:
+            c += smoothness(active_list, idx_of)[0]
         return c
 
     cur_poses = list(state.poses)
@@ -281,6 +317,11 @@ def optimize_window_joint(
         n_active = len(active_list)
         Hxx, Hxp, bx, bp, pp, cost, inliers = assemble_blocks(per_scan, active_list, idx_of)
         cost = add_priors_blocks(Hxx, bx, bp, cost, active_list)
+        sm_cost, sr, sc, sv, bp_delta = smoothness(active_list, idx_of)
+        if sr.size:
+            bp += bp_delta
+            cost += sm_cost
+            pp = (np.concatenate([pp[0], sr]), np.concatenate([pp[1], sc]), np.concatenate([pp[2], sv]))
         if not np.any(np.diag(Hxx) > 0):
             break
 
@@ -303,7 +344,7 @@ def optimize_window_joint(
             flat[av] += dx[3 * K:3 * K + len(av)]
             tsdf.phi[:] = flat.reshape(tsdf.phi.shape)
 
-        trial_cost = total_cost()
+        trial_cost = total_cost(active_list, idx_of)
         if trial_cost < cost:
             step_xy = float(np.max(np.hypot(dx[0:3 * K:3], dx[1:3 * K:3]))) if K else 0.0
             step_th = float(np.max(np.abs(dx[2:3 * K:3]))) if K else 0.0
