@@ -249,6 +249,46 @@ def test_joint_full_gpu_matches_cpu():
     np.testing.assert_allclose(tg.phi, tc.phi, rtol=0, atol=1e-4)
 
 
+@pytest.mark.skipif(not _gpu_sparse_works(), reason="no CUDA device / cupy sparse / CUDA headers")
+def test_joint_gpu_pcg_matches_splu():
+    """The Jacobi-PCG SDF-block solve (default, no factorization) must give the same
+    GN/LM step as the cuSOLVER sparse-LU factorization it replaces -- H_phiphi is SPD
+    and diagonally dominant under the SDF prior, so PCG converges to the exact solve."""
+    cfg = _cfg()
+    gt = _gt()[:3]
+    scans = [_raycast_scan(p, n_beams=120) for p in gt]
+    base = _clean_map(cfg, gt, scans)
+    rng = np.random.default_rng(7)
+    m = base.weight > 0
+    noise = rng.normal(0.0, 0.05, size=int(m.sum())).astype(np.float32)
+
+    def state():
+        mps = [
+            MotionPrior(
+                delta_x=gt[i + 1].x - gt[i].x, delta_y=gt[i + 1].y - gt[i].y,
+                delta_theta=gt[i + 1].theta - gt[i].theta, info_xy=3.0, info_theta=3.0,
+            )
+            for i in range(len(gt) - 1)
+        ]
+        return WindowState(poses=list(gt), scans=scans, motion_priors=mps, anchor=AnchorPrior(pose=gt[0]))
+
+    tl = Tsdf2D(cfg=cfg, phi=base.phi.copy(), weight=base.weight.copy())
+    tl.phi[m] += noise
+    rl = optimize_window_joint(tsdf=tl, state=state(), max_iters=12, huber_delta_m=0.2,
+                               backend="gpu", gpu_solver="splu")
+
+    tp = Tsdf2D(cfg=cfg, phi=base.phi.copy(), weight=base.weight.copy())
+    tp.phi[m] += noise
+    rp = optimize_window_joint(tsdf=tp, state=state(), max_iters=12, huber_delta_m=0.2,
+                               backend="gpu", gpu_solver="pcg")
+
+    assert rl.num_active_voxels == rp.num_active_voxels
+    assert abs(rl.final_cost - rp.final_cost) < 1e-7
+    for a, b in zip(rl.state.poses, rp.state.poses):
+        np.testing.assert_allclose([b.x, b.y, b.theta], [a.x, a.y, a.theta], rtol=0, atol=1e-7)
+    np.testing.assert_allclose(tp.phi, tl.phi, rtol=0, atol=1e-5)
+
+
 def test_joint_gpu_rejects_smoothness():
     """The GPU path does not implement the SDF smoothness regulariser; it must say so
     rather than silently dropping the term."""

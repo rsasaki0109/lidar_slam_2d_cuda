@@ -88,7 +88,7 @@ kernel 群:
 - **P1**: P0 を K=10 のウィンドウに拡張、CPU で動かす。motion prior と marginalize-as-prior。【done】
 - **P1.5**: `ScanBaEngine` を `slamx replay` に統合。online ローカル sliding TSDF で実 bag 追従。【done】
 - **P2**: CUDA 移植。kernel_residual_and_jacobian + 3K×3K Cholesky まで GPU。【一部done: cupy 版 data-block (`scan_ba/cuda.py`) が CPU と一致】
-- **P3**: SDF を変数化、Schur 込みで joint BA。【done: P3.0 dense → P3.1 疎 Schur → P3.2 平滑化 → P3.3 engine 配線+ATE → P3.4 GPU Schur(負) → P3.5 full-GPU assemble(交差点あり/小窓は負)】
+- **P3**: SDF を変数化、Schur 込みで joint BA。【done: P3.0 dense → P3.1 疎 Schur → P3.2 平滑化 → P3.3 engine 配線+ATE → P3.4 GPU Schur(負) → P3.5 full-GPU assemble(交差点あり/小窓は負) → P3.6 splu→Jacobi-PCG で分解の壁撤去（solve V=40k で 49.9x、律速は assemble へ移行）】
 - **P4**: 厳密 marginalization (Schur で先頭 pose を消し隣接 pose に prior 残す)。【done: P4 アルゴ리즘 + P4.1 engine hot loop 採用 `use_marginalization`】
 - **P-map**: 永続グローバル TSDF マップ（ループ閉じ込みで補正後 pose から再構築）。【done: `GlobalTsdfMap`, `build_global_map`】
 - **P-eval**: 大規模 ATE（600 scan × 4 変種）で joint / marginalization の利得を定量化。【done: joint は大規模でも頑健に効く（−24% rmse）、厳密 marginalization は実走行で利得なし（正直な負の結果）】
@@ -170,6 +170,15 @@ P3.4 で「solve の GPU 化は割に合わない・assemble が支配的」と�
 - **正直なベンチ**（RTX 4070 Ti SUPER）: 大窓では GPU が勝つ（~40k 窓点で 1.74x、~20k で互角）。だが engine が実際に使う固定ラグ小窓（K~10, ~4–5k 点）では **GPU が ~2x 遅い**。
 - **プロファイル内訳（4385 点, V=1068, /iter）**: bilinear 1.73ms / unique+searchsorted 0.37ms / scatter(16×`cp.add.at`) 1.57ms / COO 0.92ms / **splu solve 10.1ms**。→ assemble ではなく **cuSOLVER の疎 LU 分解が壁**（P3.4 と同根）。fused カーネルで scatter を潰しても solve 律速は変わらない。
 - 真の梃子は「より速い疎分解」or「分解の回避」（H_phiphi は強 SDF prior で対角優勢 → CG/Jacobi 反復で splu を置換できる可能性）。opt-in (`backend="gpu"`) として温存。SDF 平滑化項は GPU パス未対応（明示的に NotImplementedError）。
+
+### P3.6 所見 (2026-05-25): 分解の壁を撤去 — splu → Jacobi-PCG（gpu_solver="pcg"、デフォルト）
+
+P3.5 が指した「真の梃子＝分解の回避」を実装。`H_phiphi` は SPD かつ SDF prior 下で強く対角優勢なので、**Jacobi 前処理付き CG**（`_pcg_spd_multi`、cuSPARSE spmm + 縮約のみ、因子分解なし）で `splu`（cuSOLVER 疎 LU）を置換。複数 RHS（3K+1 列）を列方向にベクトル化して一括反復、全列の相対残差 < tol まで回す。`backend="gpu"` の既定を `gpu_solver="pcg"` に（`"splu"` は比較用に温存）。
+
+- **数値一致を保証**: PCG は厳密解に収束 — `test_joint_gpu_pcg_matches_splu` で splu と一致（cost <1e-7, pose 1e-7, phi 1e-5）、`test_joint_full_gpu_matches_cpu` 経由で CPU schur とも一致。マイクロベンチでは splu との最大差 ~1e-13。
+- **分離ベンチ（solve のみ, m=16 RHS, RTX 4070 Ti SUPER, `tools/bench_joint_gpu_solver.py` 系）**: splu は V に対し線形〜超線形（V=1k:11ms → 5k:62ms → 10k:131ms → 40k:539ms）、**PCG はほぼ一定 ~8–11ms**（対角優勢で反復数が V に依らない）。speedup V=1k:1.39x → 5k:7.4x → 10k:16x → **40k:49.9x**。P3.5 で「splu が ~10ms/iter で壁」と言った数値は PCG では消える。
+- **end-to-end（full joint GPU solve, K=5, 12 iters）**: V_active>~1000 で勝ち始め 1.08–1.14x、~700 以下では splu の安い分解が勝つ。end-to-end の利得が薄いのは gather+assemble が支配するため — **律速が分解から assemble へ完全に移った**（P2.9/P3.4 以来の一貫した教訓「線形ソルブは律速ではない」を最終的に裏取り）。大窓ほど効く（P3.5 で GPU が勝ち始めた V≥10k 域では solve 131→8ms）。
+- 結論: 文書化していた「最後の真の梃子」を消化。分解の壁は撤去済み。これ以上の joint GPU 高速化は assemble の fused カーネル化が残るが、固定ラグ小窓では CPU schur で十分速く、動機は薄い（正直な収束点）。
 
 ### P-map 所見 (2026-05-25): 永続グローバル TSDF マップ（ループ閉じ込み整合）
 
