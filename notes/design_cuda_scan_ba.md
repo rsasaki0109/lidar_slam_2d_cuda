@@ -161,7 +161,19 @@ evaluate あたりの内訳を実測 (K=10, 2k 点):
 
 - **損益分岐が 2k 点未満へ低下 = 実用 2D ウィンドウ (K=10 × 200〜1000 点) で GPU が CPU を上回る**。fused 時間は 10〜40 ms とほぼ一定で良く償却。
 - P2 (素朴 per-block port, 全域で負け) → P2.5 (on-device, ~50k 分岐) → P2.5c (fused kernel, ~15-20k) → P2.9 (assembly ベクトル化, <2k) と段階的に分岐点を下げ切った。
-- 残課題: 実 `replay` への `use_cuda` 統合、SDF 同時最適化 (P3)。教訓: 「GPU が遅い」の主因は素朴に思える small-op の Python ループ launch であり、custom kernel より先にプロファイルすべきだった。
+- 教訓: 「GPU が遅い」の主因は素朴に思える small-op の Python ループ launch であり、custom kernel より先にプロファイルすべきだった。
+
+### engine 統合所見 (2026-05-25)
+
+`ScanBaEngineConfig.use_cuda` を追加し、`handle_scan` のウィンドウ solve を `optimize_window_cuda` に差し替え可能に (CLI: `slam.scan_ba.use_cuda`、cupy/CUDA 不在なら CPU フォールバック)。実 backpack 80 scans の end-to-end:
+
+| | 時間 | 軌跡 |
+|--|------|------|
+| CPU | 70.6 s | — |
+| CUDA | 63.1 s | CPU と 7e-16 m 一致 |
+
+- **end-to-end は ~1.1x に留まる**。per-scan コストはウィンドウ solve でなく **CPU 側の `_rebuild_local_map` (直近 20 scans を 1.44M セル TSDF へ畳む) + preprocess** が支配的で、solve の 1.07〜1.7x が全体の ~10% にしか効かない。
+- **次のボトルネック = TSDF 再構築 (`update_tsdf_from_scan`) の GPU 化**。ローカルマップ折り込みも device 常駐にすれば、毎スキャンの TSDF upload (約 23 MB) も不要になり end-to-end の speedup が出る。P3.x 候補。
 
 ## 9. オープン問題 / リスク
 

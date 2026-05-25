@@ -103,5 +103,36 @@ def test_gpu_window_solve_matches_cpu(backend):
         np.testing.assert_allclose([b.x, b.y, b.theta], [a.x, a.y, a.theta], rtol=0, atol=1e-9)
 
 
+def test_engine_use_cuda_matches_cpu():
+    """The replay engine with use_cuda=True must track identically to the CPU path."""
+    from slamx.core.scan_ba import ScanBaEngine, ScanBaEngineConfig
+    from slamx.core.scan_ba.tsdf import Tsdf2DConfig
+
+    from tests.test_scan_ba_engine import _l_room_laserscan
+
+    def _cfg(use_cuda: bool) -> ScanBaEngineConfig:
+        return ScanBaEngineConfig(
+            tsdf=Tsdf2DConfig(
+                resolution_m=0.05, origin_x_m=-5.0, origin_y_m=-5.0, size_x_m=14.0, size_y_m=14.0, truncation_m=0.5
+            ),
+            window_size=6,
+            seed_scans=3,
+            prediction_mode="constant_velocity",
+            use_cuda=use_cuda,
+        )
+
+    traj = [Pose2(0.2 * i, 0.1 * i, 0.02 * i) for i in range(12)]
+    cpu = ScanBaEngine(cfg=_cfg(False))
+    gpu = ScanBaEngine(cfg=_cfg(True))
+    assert gpu._window_solver is cuda.optimize_window_cuda  # resolved to GPU path
+    for p in traj:
+        sc = _l_room_laserscan(p)
+        cpu.handle_scan(sc)
+        gpu.handle_scan(sc)
+
+    for a, b in zip(cpu.graph.poses, gpu.graph.poses):
+        np.testing.assert_allclose([b.x, b.y, b.theta], [a.x, a.y, a.theta], rtol=0, atol=1e-6)
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
