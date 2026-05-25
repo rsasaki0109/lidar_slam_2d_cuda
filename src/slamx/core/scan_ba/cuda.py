@@ -14,7 +14,7 @@ import os
 
 import numpy as np
 
-from slamx.core.scan_ba.tsdf import Tsdf2D
+from slamx.core.scan_ba.tsdf import Tsdf2D, Tsdf2DConfig
 from slamx.core.scan_ba.window import WindowResult, WindowState
 from slamx.core.types import Pose2
 
@@ -413,3 +413,85 @@ def optimize_window_cuda(
         converged=converged,
         diagnostics={"lm_lambda_final": lam, "inliers_per_scan": inliers, "backend": f"cuda-{backend}"},
     )
+
+
+def update_tsdf_from_scan_cuda(
+    phi_d,
+    weight_d,
+    *,
+    cfg: Tsdf2DConfig,
+    pose: Pose2,
+    pts_d,
+    truncation_m: float | None = None,
+    weight_inc: float = 1.0,
+    weight_max: float = 100.0,
+) -> int:
+    """In-place GPU volumetric TSDF fold for one scan (device-resident local map).
+
+    cupy port of `tsdf_update.update_tsdf_from_scan`: `phi_d`/`weight_d` are float32
+    device arrays mutated in place, `pts_d` is an (N,2) device array of sensor-frame
+    points. Uses `cp.add.at` for the per-voxel accumulation (mirrors numpy's
+    `np.add.at`), and keeps the same float32 store so a sequence of folds matches the
+    CPU path. Returns the number of voxels touched.
+    """
+    cp = _cupy()
+    if pts_d.shape[0] == 0:
+        return 0
+    trunc = float(truncation_m if truncation_m is not None else cfg.truncation_m)
+    res = float(cfg.resolution_m)
+    ox, oy = float(cfg.origin_x_m), float(cfg.origin_y_m)
+    h, w = int(phi_d.shape[0]), int(phi_d.shape[1])
+
+    c, s = float(np.cos(pose.theta)), float(np.sin(pose.theta))
+    R = cp.asarray([[c, -s], [s, c]], dtype=cp.float64)
+    t = cp.asarray([pose.x, pose.y], dtype=cp.float64)
+    hits = pts_d @ R.T + t  # (N, 2)
+
+    d = hits - t
+    dn = cp.linalg.norm(d, axis=1)
+    valid_dir = dn > 1e-6
+    d_unit = cp.zeros_like(d)
+    d_unit[valid_dir] = d[valid_dir] / dn[valid_dir, None]
+
+    rc = int(np.ceil(trunc / res))
+    di = cp.arange(-rc, rc + 1, dtype=cp.int64)
+    ddi, ddj = cp.meshgrid(di, di, indexing="ij")
+    ddi_f, ddj_f = ddi.ravel(), ddj.ravel()
+
+    hi = cp.floor((hits[:, 0] - ox) / res - 0.5).astype(cp.int64)
+    hj = cp.floor((hits[:, 1] - oy) / res - 0.5).astype(cp.int64)
+    Hi = hi[:, None] + ddi_f[None, :]  # (N, M)
+    Hj = hj[:, None] + ddj_f[None, :]
+    in_bounds = (Hi >= 0) & (Hi < w) & (Hj >= 0) & (Hj < h)
+
+    vx = ox + (Hi + 0.5) * res
+    vy = oy + (Hj + 0.5) * res
+    dx_to_hit = hits[:, 0:1] - vx
+    dy_to_hit = hits[:, 1:2] - vy
+    s_dist = dx_to_hit * d_unit[:, 0:1] + dy_to_hit * d_unit[:, 1:2]
+    dist = cp.hypot(dx_to_hit, dy_to_hit)
+    mask = in_bounds & (dist <= trunc) & valid_dir[:, None]
+    s_dist = cp.clip(s_dist, -trunc, trunc)
+
+    flat_idx = (Hj * w + Hi)[mask].astype(cp.int64)
+    sel_dist = s_dist[mask].astype(cp.float64)
+    if flat_idx.size == 0:
+        return 0
+
+    flat_phi = phi_d.ravel().astype(cp.float64)
+    flat_w = weight_d.ravel().astype(cp.float64)
+    sum_w = cp.zeros_like(flat_w)
+    sum_wd = cp.zeros_like(flat_phi)
+    w_inc = float(weight_inc)
+    cp.add.at(sum_w, flat_idx, w_inc)
+    cp.add.at(sum_wd, flat_idx, w_inc * sel_dist)
+
+    touched = sum_w > 0
+    denom = flat_w + sum_w
+    new_w = cp.minimum(denom, float(weight_max))
+    new_phi = flat_phi.copy()
+    new_phi[touched] = (flat_phi[touched] * flat_w[touched] + sum_wd[touched]) / denom[touched]
+
+    phi_d[:] = new_phi.astype(cp.float32).reshape(phi_d.shape)
+    weight_d[:] = new_w.astype(cp.float32).reshape(weight_d.shape)
+    return int(touched.sum().get())

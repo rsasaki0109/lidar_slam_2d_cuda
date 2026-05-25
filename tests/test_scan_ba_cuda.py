@@ -103,6 +103,34 @@ def test_gpu_window_solve_matches_cpu(backend):
         np.testing.assert_allclose([b.x, b.y, b.theta], [a.x, a.y, a.theta], rtol=0, atol=1e-9)
 
 
+def test_gpu_tsdf_fold_matches_cpu():
+    """A sequence of GPU TSDF folds must match the CPU weighted-average fold."""
+    from slamx.core.scan_ba.tsdf import Tsdf2D
+    from slamx.core.scan_ba.tsdf_update import update_tsdf_from_scan
+
+    cfg = Tsdf2DConfig(
+        resolution_m=0.05, origin_x_m=-2.0, origin_y_m=-2.0, size_x_m=10.0, size_y_m=10.0, truncation_m=0.6
+    )
+    poses = [Pose2(2.0 + 0.2 * i, 1.5 + 0.1 * i, 0.05 * i) for i in range(6)]
+    scans = [_raycast_scan(p) for p in poses]
+
+    cpu = Tsdf2D.zeros(cfg)
+    for p, sc in zip(poses, scans):
+        update_tsdf_from_scan(cpu, pose_map=p, points_sensor=sc, weight_inc=1.0, weight_max=100.0)
+
+    cp = cuda._cupy()
+    phi = cp.zeros((cpu.height, cpu.width), dtype=cp.float32)
+    wt = cp.zeros_like(phi)
+    for p, sc in zip(poses, scans):
+        cuda.update_tsdf_from_scan_cuda(
+            phi, wt, cfg=cfg, pose=p, pts_d=cp.asarray(sc, dtype=cp.float64), weight_inc=1.0, weight_max=100.0
+        )
+
+    m = cpu.weight > 0
+    np.testing.assert_allclose(cp.asnumpy(wt), cpu.weight, rtol=0, atol=1e-4)
+    np.testing.assert_allclose(cp.asnumpy(phi)[m], cpu.phi[m], rtol=0, atol=1e-4)
+
+
 def test_engine_use_cuda_matches_cpu():
     """The replay engine with use_cuda=True must track identically to the CPU path."""
     from slamx.core.scan_ba import ScanBaEngine, ScanBaEngineConfig
