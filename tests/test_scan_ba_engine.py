@@ -142,6 +142,60 @@ def test_engine_dispatch_from_config():
     assert eng.cfg.window_size == 8
 
 
+def _joint_engine() -> ScanBaEngine:
+    cfg = ScanBaEngineConfig(
+        tsdf=Tsdf2DConfig(
+            resolution_m=0.05,
+            origin_x_m=-5.0,
+            origin_y_m=-5.0,
+            size_x_m=14.0,
+            size_y_m=14.0,
+            truncation_m=0.5,
+        ),
+        window_size=6,
+        seed_scans=3,
+        prediction_mode="constant_velocity",
+        use_joint=True,
+        joint_sdf_prior_info=10.0,
+    )
+    return ScanBaEngine(cfg=cfg)
+
+
+def test_engine_joint_mode_tracks_trajectory():
+    """The joint pose+SDF window solver is a drop-in window backend: it must track
+    the same moving trajectory the pose-only engine tracks, without blowing up."""
+    gt = [
+        Pose2(0.0, 0.0, 0.0),
+        Pose2(0.2, 0.1, 0.02),
+        Pose2(0.4, 0.2, 0.04),
+        Pose2(0.6, 0.25, 0.06),
+        Pose2(0.8, 0.3, 0.08),
+        Pose2(1.0, 0.35, 0.10),
+    ]
+    eng = _joint_engine()
+    assert eng._joint_active and not eng._cuda_active
+    out = [eng.handle_scan(_l_room_laserscan(p)) for p in gt]
+
+    assert len(out) == len(gt)
+    final_err = math.hypot(out[-1].x - gt[-1].x, out[-1].y - gt[-1].y)
+    assert final_err < 0.15, f"final drift {final_err:.4f}m, poses={out}"
+    assert out[-1].x > out[0].x + 0.5
+
+
+def test_engine_joint_dispatch_from_config():
+    cfg = {
+        "slam": {
+            "frontend": "scan_ba",
+            "scan_ba": {"window_size": 8, "use_joint": True, "joint_sdf_smooth_info": 1.5},
+        }
+    }
+    eng = _engine_from_config(cfg, None)
+    assert isinstance(eng, ScanBaEngine)
+    assert eng.cfg.use_joint is True
+    assert eng.cfg.joint_sdf_smooth_info == 1.5
+    assert eng._joint_active
+
+
 if __name__ == "__main__":
     import pytest
 
