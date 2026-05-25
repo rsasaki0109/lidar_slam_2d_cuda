@@ -88,7 +88,7 @@ kernel 群:
 - **P1**: P0 を K=10 のウィンドウに拡張、CPU で動かす。motion prior と marginalize-as-prior。【done】
 - **P1.5**: `ScanBaEngine` を `slamx replay` に統合。online ローカル sliding TSDF で実 bag 追従。【done】
 - **P2**: CUDA 移植。kernel_residual_and_jacobian + 3K×3K Cholesky まで GPU。【一部done: cupy 版 data-block (`scan_ba/cuda.py`) が CPU と一致】
-- **P3**: SDF を変数化、Schur 込みで joint BA。【done: P3.0 dense → P3.1 疎 Schur → P3.2 平滑化 → P3.3 engine 配線+ATE → P3.4 GPU Schur(負) → P3.5 full-GPU assemble(交差点あり/小窓は負) → P3.6 splu→Jacobi-PCG で分解の壁撤去（solve V=40k で 49.9x、律速は assemble へ移行）】
+- **P3**: SDF を変数化、Schur 込みで joint BA。【done: P3.0 dense → P3.1 疎 Schur → P3.2 平滑化 → P3.3 engine 配線+ATE → P3.4 GPU Schur(負) → P3.5 full-GPU assemble(交差点あり/小窓は負) → P3.6 splu→Jacobi-PCG で分解の壁撤去（solve V=40k で 49.9x、律速は assemble へ移行）→ P3.7 assemble を fused atomicAdd RawKernel に（assemble 単体 ~70x、end-to-end 1.2x、律速は PCG solve+host roundtrip へ）】
 - **P4**: 厳密 marginalization (Schur で先頭 pose を消し隣接 pose に prior 残す)。【done: P4 アルゴ리즘 + P4.1 engine hot loop 採用 `use_marginalization`】
 - **P-map**: 永続グローバル TSDF マップ（ループ閉じ込みで補正後 pose から再構築）。【done: `GlobalTsdfMap`, `build_global_map`】
 - **P-eval**: 大規模 ATE（600 scan × 4 変種）で joint / marginalization の利得を定量化。【done: joint は大規模でも頑健に効く（−24% rmse）、厳密 marginalization は実走行で利得なし（正直な負の結果）】
@@ -178,7 +178,29 @@ P3.5 が指した「真の梃子＝分解の回避」を実装。`H_phiphi` は 
 - **数値一致を保証**: PCG は厳密解に収束 — `test_joint_gpu_pcg_matches_splu` で splu と一致（cost <1e-7, pose 1e-7, phi 1e-5）、`test_joint_full_gpu_matches_cpu` 経由で CPU schur とも一致。マイクロベンチでは splu との最大差 ~1e-13。
 - **分離ベンチ（solve のみ, m=16 RHS, RTX 4070 Ti SUPER, `tools/bench_joint_gpu_solver.py` 系）**: splu は V に対し線形〜超線形（V=1k:11ms → 5k:62ms → 10k:131ms → 40k:539ms）、**PCG はほぼ一定 ~8–11ms**（対角優勢で反復数が V に依らない）。speedup V=1k:1.39x → 5k:7.4x → 10k:16x → **40k:49.9x**。P3.5 で「splu が ~10ms/iter で壁」と言った数値は PCG では消える。
 - **end-to-end（full joint GPU solve, K=5, 12 iters）**: V_active>~1000 で勝ち始め 1.08–1.14x、~700 以下では splu の安い分解が勝つ。end-to-end の利得が薄いのは gather+assemble が支配するため — **律速が分解から assemble へ完全に移った**（P2.9/P3.4 以来の一貫した教訓「線形ソルブは律速ではない」を最終的に裏取り）。大窓ほど効く（P3.5 で GPU が勝ち始めた V≥10k 域では solve 131→8ms）。
-- 結論: 文書化していた「最後の真の梃子」を消化。分解の壁は撤去済み。これ以上の joint GPU 高速化は assemble の fused カーネル化が残るが、固定ラグ小窓では CPU schur で十分速く、動機は薄い（正直な収束点）。
+- 結論: 文書化していた「最後の真の梃子」を消化。分解の壁は撤去済み。残る joint GPU の梃子は assemble の fused カーネル化（→ P3.7 で実施）。
+
+### P3.7 所見 (2026-05-25): assemble を 1 本の atomicAdd RawKernel に融合（gpu_assemble="fused"、デフォルト）
+
+P3.6 が「律速は assemble へ移った」と指した点を実測で割り、潰した。**まず内訳プロファイル**（`tools/prof_joint_assemble.py`、1 LM iter を sub-step ごとに同期計測, V~1k–1.9k）:
+
+| sub-step | ms | 備考 |
+|--|--|--|
+| bilinear gather | ~1.7 | |
+| pose-block reduce (Hxx,bx) | ~1.6–2.2 | 6 本の bincount |
+| Hxp+bp scatter | ~1.5–1.6 | **16 本の `cp.add.at`**（各々 sorted/atomic pass） |
+| H_phiphi 三重項構築 | ~0.85 | |
+| COO→CSR coalesce | ~1.4 | |
+| **PCG solve** | **~5.6–7.0** | **単一で最大**（V=1.4k で 11 反復、毎反復 D2H 同期） |
+
+→ **どこか 1 箇所が compute で支配的なのではなく、全面的に launch/latency-bound**（各 sub-step ~1.5ms はカーネル起動オーバヘッド、点数は ~3k と小さい）。P3.6 の「assemble が律速」は半分正しく、正確には「PCG solve が単一最大、assemble は複数 launch の合算で同程度」。
+
+**実装**: pose 3x3 ブロック・b_x・H_xphi・b_phi を 1 本の `cp.RawKernel`（`_fused_assemble_gpu`、float64 atomicAdd, 1 thread/point）で構築。6 本の bincount + 16 本の `cp.add.at` を **1 launch** に置換。H_phiphi 三重項と CSR coalesce は両 path 共通で残す（PCG が CSR spmm を要するため）。
+
+- **assemble サブステップ単体**: poseblk+scatter 3.1–3.7ms → **fused 0.05ms（~60–72x）**。
+- **end-to-end（full joint GPU solve, K=5, 12 iters, pcg）**: vectorized 250–263ms → **fused 179–215ms（1.20–1.23x）**。残りは PCG solve（~6ms/iter）+ 毎反復の host↔device pose roundtrip と trial-cost 再評価（data_cost の再 gather）が支配。
+- **数値**: float64 atomicAdd は和の順序を変えるため bit-exact ではなく丸め誤差レベル一致。`test_joint_gpu_fused_matches_vectorized` で vectorized と一致（cost <1e-7, pose 1e-7, phi 1e-5）、`test_joint_full_gpu_matches_cpu`（cost 1e-6, phi 1e-4）も fused 既定で pass。全 135 passed。
+- **次の梃子（P3.8 候補, 未実施）**: 律速は PCG solve（11 反復 × 〔spmm + 数個の縮約 + 毎反復同期〕で latency-bound）と毎反復の host roundtrip/trial 再評価。PCG の収束判定を数反復ごとに（毎反復 D2H 同期を削減）、または LM の trial 評価を on-device 化して host roundtrip を畳むのが次の一手。ただし固定ラグ小窓では CPU schur で既に十分速く、ROI は逓減（正直な注記）。
 
 ### P-map 所見 (2026-05-25): 永続グローバル TSDF マップ（ループ閉じ込み整合）
 
