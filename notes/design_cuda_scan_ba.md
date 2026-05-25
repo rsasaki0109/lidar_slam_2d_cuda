@@ -244,6 +244,14 @@ joint が pose_only に勝つ源泉を切り分けるための調査。200 scan 
 - **f_scale=0.5 の根拠**: 受理ループ辺の残差は rms ゲート ≤0.3 m。f_scale=0.5 なら良辺（rms≤0.3）は cauchy のほぼ二次域（z≤0.36, weight≥0.73）に残しつつ、メートル級にずれた粗大外れ値だけを強く減衰。0.3 まで下げると良辺も削り始めるので不可。
 - **定量（単発の粗大偽辺ストレステスト, 6 pose ループ + 完全オドメトリ + 真ループ辺、偽辺が pose3≡pose0 を主張）**: 最大軌跡偏差 = **素の L2 で 1.87 m → 重み 0.4 + cauchy(0.5) で 0.31 m（約 6 倍改善）**。f_scale=0.3 なら 0.19 m。π フリップの極端な単発外れ値なので「真値完全復元」までは行かないが、軌跡破壊は確実に防げる。test_pose_graph に `test_robust_loss_rejects_false_loop_edge` / `test_edge_weight_down_weights_conflicting_edge` を追加（137 passed）。
 
+### P-loop 実バッグ定量 (2026-05-26): ロバスト化は「整地された実データ」では引き分け、ロバスト化の出番はゲート緩和時（正直な結果）
+
+上の 6 倍は合成の単発外れ値のみ。実バッグ（Cartographer backpack_2d）で測り直した。このデータは最初の大ループが scan ~1200 付近（バックパックが過去ノードの `loop_dist_m` 内に戻る）なので **1300 scan** 回す必要がある。`tools/eval_loop_closure.py` で 3 変種を ATE 比較（Umeyama 整合、GT=Cartographer 軌跡、別キャッシュで並列実行、各 ~23–31 分）。`_scan_ba_engine_from_config` に `loop_robust_loss`/`loop_robust_f_scale`/`loop_edge_weighting` を配線し、engine に `loop_edge_weighting`（off で全ループ辺を 1.0、旧挙動）フラグを追加して A/B を可能にした。
+
+- **(a) ループ閉じ込み自体は実データで明確な勝ち**: noloop rmse **1.061** / max **1.925**（ループ辺 0、1257 ペア）→ loop_robust rmse **0.848** / max **1.306**（ループ辺 **506**）。**rmse −20% / max −32%**。長い往復のドリフトを pose-graph 補正が確かに縮める。
+- **(b) ロバスト化 vs 旧 L2 は tight ゲートではほぼ引き分け**: loop_naive（linear + 全辺 1.0）rmse **0.845** / max **1.331** vs loop_robust（cauchy 0.5 + inlier 重み）rmse **0.848** / max **1.306**。両者ループ辺 506 で同一検出。rmse は +0.003 m（誤差内、良辺をわずかに削るぶん微減）、max は −0.025 m（最も不整合な数辺をクリップして worst-case 改善）。**marginalization (P4.1) と同じ構図** — 検出ゲート 3 段が偽陽性をほぼ排除しているので、最適化側のロバスト化が効く余地が小さい。実装は正しく、合成の敵対ケースでは効く（1.87→0.31 m）が、整地された実データでは検出ゲートが主役で最適化ロバスト化は ~break-even。
+- **結論**: 既定で残す価値はある（worst-case を僅かに改善＆悪化させない＝無料の保険）が、**この問題で精度を伸ばす本丸は検出側**（候補生成・幾何検証）であってロバスト最適化ではない。緩ゲート時に naive が崩れて robust が耐えるか（保険の実証）は別途計測中。
+
 ### P2 ベンチ所見 (2026-05-24, GPU, cupy 14.1, CUDA 12.0)
 
 per-scan data-block (sample+Jacobian+JtWJ/JtWr) を cupy で実装、TSDF 常駐・30反復平均:
