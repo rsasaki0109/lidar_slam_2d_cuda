@@ -173,7 +173,20 @@ evaluate あたりの内訳を実測 (K=10, 2k 点):
 | CUDA | 63.1 s | CPU と 7e-16 m 一致 |
 
 - **end-to-end は ~1.1x に留まる**。per-scan コストはウィンドウ solve でなく **CPU 側の `_rebuild_local_map` (直近 20 scans を 1.44M セル TSDF へ畳む) + preprocess** が支配的で、solve の 1.07〜1.7x が全体の ~10% にしか効かない。
-- **次のボトルネック = TSDF 再構築 (`update_tsdf_from_scan`) の GPU 化**。ローカルマップ折り込みも device 常駐にすれば、毎スキャンの TSDF upload (約 23 MB) も不要になり end-to-end の speedup が出る。P3.x 候補。
+- **次のボトルネック = TSDF 再構築 (`update_tsdf_from_scan`) の GPU 化**。ローカルマップ折り込みも device 常駐にすれば、毎スキャンの TSDF upload (約 23 MB) も不要になり end-to-end の speedup が出る。→ 次節で実施。
+
+### device 常駐ローカルマップ所見 (2026-05-25): end-to-end 6.7x
+
+`update_tsdf_from_scan` を cupy 移植 (`update_tsdf_from_scan_cuda`, `cp.add.at` で散布、float32 store 踏襲 → CPU と bit 一致)。engine が `use_cuda` 時に phi/weight を float32 device 配列として常駐させ、毎スキャンの `_rebuild_local_map` (直近 `map_window` scan の折り込み) も `optimize_window_cuda` も**同じ device TSDF を共有**。host upload は消滅 (bootstrap の最初の 2 scan だけ単発 align 用に device→host ダウンロード)。実 backpack 80 scans:
+
+| | 時間 | ms/scan | 軌跡 |
+|--|------|---------|------|
+| CPU | 68.1 s | 851 | — |
+| CUDA (device 常駐) | **10.1 s** | **126** | CPU と 7e-16 m 一致 |
+
+- **end-to-end 6.74x**。solve だけ GPU の ~1.1x から、fold も device 常駐化して跳ね上がった。CPU の per-scan を支配していた `_rebuild_local_map` (20 fold × 1.44M セル全配列演算 + `np.add.at`) が GPU 散布に置き換わり、かつ毎スキャンの 23 MB upload も消えた。
+- loop closure / bootstrap の単発 align は CPU のまま (低頻度)。`cuda.is_available()` 偽なら自動 CPU フォールバック。
+- 残: loop closure 検証 TSDF も device 化、SDF 同時最適化 (P3)。
 
 ## 9. オープン問題 / リスク
 

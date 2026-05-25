@@ -204,6 +204,8 @@ def optimize_window_cuda(
     lm_lambda_min: float = 1e-8,
     lm_lambda_max: float = 1e6,
     backend: str = "fused",
+    phi_dev=None,
+    weight_dev=None,
 ) -> WindowResult:
     """Fully on-device fixed-lag window LM solve (P2.5).
 
@@ -215,10 +217,17 @@ def optimize_window_cuda(
 
     backend="fused" (default) runs the data term in one custom kernel (P2.5c);
     "bincount" uses the pure-cupy reduction path (kept for comparison/fallback).
+
+    phi_dev/weight_dev: pre-uploaded device TSDF arrays (e.g. a device-resident local
+    map). When given, `tsdf` is used only for its grid config -- no host->device upload.
     """
     cp = _cupy()
     K = state.k
-    phi_d, weight_d = upload_tsdf(tsdf)
+    if phi_dev is None:
+        phi_d, weight_d = upload_tsdf(tsdf)
+    else:
+        phi_d = phi_dev if phi_dev.dtype == cp.float64 else phi_dev.astype(cp.float64)
+        weight_d = weight_dev if weight_dev.dtype == cp.float64 else weight_dev.astype(cp.float64)
     cfg = tsdf.cfg
     n3 = 3 * K
 
