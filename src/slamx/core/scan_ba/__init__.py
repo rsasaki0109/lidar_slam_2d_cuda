@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from slamx.core.scan_ba.align import AlignmentResult, align_scan_to_tsdf
 from slamx.core.scan_ba.engine import ScanBaEngine, ScanBaEngineConfig
+from slamx.core.scan_ba.joint import JointWindowResult, optimize_window_joint
 from slamx.core.scan_ba.tsdf import Tsdf2D, Tsdf2DConfig
 from slamx.core.scan_ba.tsdf_update import update_tsdf_from_scan
 from slamx.core.scan_ba.window import (
@@ -16,6 +17,7 @@ from slamx.core.scan_ba.window import (
 __all__ = [
     "AlignmentResult",
     "AnchorPrior",
+    "JointWindowResult",
     "MotionPrior",
     "ScanBaEngine",
     "ScanBaEngineConfig",
@@ -25,6 +27,7 @@ __all__ = [
     "WindowState",
     "align_scan_to_tsdf",
     "optimize_window",
+    "optimize_window_joint",
     "slide_window",
     "update_tsdf_from_scan",
 ]

@@ -88,8 +88,22 @@ kernel 群:
 - **P1**: P0 を K=10 のウィンドウに拡張、CPU で動かす。motion prior と marginalize-as-prior。【done】
 - **P1.5**: `ScanBaEngine` を `slamx replay` に統合。online ローカル sliding TSDF で実 bag 追従。【done】
 - **P2**: CUDA 移植。kernel_residual_and_jacobian + 3K×3K Cholesky まで GPU。【一部done: cupy 版 data-block (`scan_ba/cuda.py`) が CPU と一致】
-- **P3**: SDF を変数化、Schur 込みで joint BA。
+- **P3**: SDF を変数化、Schur 込みで joint BA。【P3.0 done: CPU dense リファレンス `scan_ba/joint.py`】
 - **P4**: 厳密 marginalization (Schur で先頭 pose を消し、隣接 pose と SDF 境界に prior 残す) と loop closure 連動。
+
+### P3.0 所見 (2026-05-25): joint pose+SDF BA (CPU dense リファレンス)
+
+`optimize_window_joint` (`scan_ba/joint.py`)。ウィンドウ点の bilinear 近傍ボクセル φ を pose と同時に変数化。点残差 `r = Σ_c w_c φ_{v_c}` の Jacobian は pose 部 (grad·∂(Tp)/∂ξ, 3) と SDF 部 (bilinear 重み w_c, 4 ボクセル)。各 active ボクセルに fold 時値 φ0 への prior を貼り自明解 φ=0 を防ぐ。full dense (3K+V) 正規方程式を直接 LM solve、refine 後の φ を `tsdf` に書き戻す。
+
+検証 (L-room, SDF にノイズ σ=0.05 を注入した劣化マップ):
+
+| | final cost |
+|--|-----------|
+| pose-only (`optimize_window`) | 0.669 |
+| joint (pose+SDF) | **0.524** |
+
+- 劣化マップ上で joint は **pose-only より低コスト** (φ も refine してデータ残差を下げる)。active ボクセル 560、pose は GT 近傍維持 (max dev 0.015 m)。
+- 制約: dense (3K+V)² 直接 solve なので小ウィンドウ向けリファレンス。**P3.1**: H_φφ を Schur 消去 (SDF ブロックは data の 4×4 + prior 対角 + 平滑化の疎構造) して 3K pose 系に縮約、その後 GPU 化。**P3.2**: SDF 平滑化項を追加。
 
 ### P2 ベンチ所見 (2026-05-24, RTX 4070 Ti SUPER, cupy 14.1, CUDA 12.0)
 
