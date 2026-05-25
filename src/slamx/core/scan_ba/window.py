@@ -41,6 +41,10 @@ class WindowState:
     scans: list[np.ndarray]  # each (N_i, 2) in sensor frame
     motion_priors: list[MotionPrior] = field(default_factory=list)
     anchor: AnchorPrior | None = None
+    # Exact-marginalization prior on the oldest pose (pose 0), produced by
+    # Schur-eliminating the pose that left the window. Replaces the heuristic anchor
+    # when present; see marginalize.py. Typed loosely to avoid a circular import.
+    marg_prior: object | None = None
 
     def __post_init__(self) -> None:
         if len(self.poses) != len(self.scans):
@@ -155,6 +159,13 @@ def _evaluate(state: WindowState, tsdf: Tsdf2D, huber_delta_m: float) -> tuple[n
         b[0:3] += W_diag * r
         cost += 0.5 * float(np.sum(W_diag * r * r))
 
+    # exact-marginalization prior on the oldest pose (pose 0)
+    if state.marg_prior is not None:
+        Hm, bm, cm = state.marg_prior.blocks(state.poses[0])
+        H[0:3, 0:3] += Hm
+        b[0:3] += bm
+        cost += cm
+
     return H, b, cost, inliers
 
 
@@ -182,6 +193,7 @@ def optimize_window(
         scans=state.scans,
         motion_priors=list(state.motion_priors),
         anchor=state.anchor,
+        marg_prior=state.marg_prior,
     )
     lam = float(lm_lambda_init)
     iterations = 0
@@ -204,7 +216,8 @@ def optimize_window(
 
         trial_poses = _apply_increment(cur.poses, dx)
         trial = WindowState(
-            poses=trial_poses, scans=cur.scans, motion_priors=cur.motion_priors, anchor=cur.anchor
+            poses=trial_poses, scans=cur.scans, motion_priors=cur.motion_priors,
+            anchor=cur.anchor, marg_prior=cur.marg_prior,
         )
         _, _, trial_cost, _ = _evaluate(trial, tsdf, huber_delta_m)
 
@@ -240,9 +253,17 @@ def slide_window(
     bake_old_as_anchor: bool = True,
     anchor_info_xy: float = 1.0e6,
     anchor_info_theta: float = 1.0e6,
+    marginalize: bool = False,
+    tsdf: Tsdf2D | None = None,
+    huber_delta_m: float = 0.15,
 ) -> WindowState:
-    """Drop the oldest pose, append a new one. Optionally bake the displaced
-    second-oldest pose as the new AnchorPrior (marginalize-as-prior approximation).
+    """Drop the oldest pose, append a new one.
+
+    `marginalize=True` performs exact Schur-complement marginalization of the dropped
+    pose (requires `tsdf`): the new oldest pose carries a `MarginalizationPrior` that
+    reproduces the information the dropped pose held, recursing on any prior marginal.
+    Otherwise the displaced second-oldest pose is baked as a strong AnchorPrior
+    (the marginalize-as-prior approximation).
     """
     if state.k == 0:
         raise ValueError("cannot slide an empty window")
@@ -250,6 +271,25 @@ def slide_window(
     new_scans = state.scans[1:] + [new_scan]
     # the old motion prior between pose_0 and pose_1 is dropped; remaining shift left.
     new_motion_priors = list(state.motion_priors[1:]) + [new_motion_prior]
+    if marginalize:
+        if tsdf is None:
+            raise ValueError("marginalize=True requires the tsdf used to linearize the data term")
+        if state.k < 2:
+            return WindowState(poses=new_poses, scans=new_scans, motion_priors=new_motion_priors, anchor=state.anchor)
+        from slamx.core.scan_ba.marginalize import marginalize_oldest_pose
+
+        marg = marginalize_oldest_pose(
+            tsdf=tsdf,
+            poses=state.poses,
+            scans=state.scans,
+            motion_prior=state.motion_priors[0],
+            huber_delta_m=huber_delta_m,
+            anchor=state.anchor,
+            prev_marg=state.marg_prior,
+        )
+        return WindowState(
+            poses=new_poses, scans=new_scans, motion_priors=new_motion_priors, anchor=None, marg_prior=marg
+        )
     if bake_old_as_anchor:
         # the surviving oldest is what was state.poses[1]; pin it as the new anchor.
         anchor = AnchorPrior(
