@@ -19,6 +19,14 @@ pip install -e .[rosbag]
 slamx replay <bag> --topic <scan_topic> --config configs/scan_ba_backpack_s300.yaml --out runs/demo
 ```
 
+## Analyze A Run
+
+```bash
+slamx cloud-analyze runs/loop_run --baseline-run runs/no_loop_run --markdown
+```
+
+`CloudAnalyzer` reads `trajectory.json` and `telemetry.jsonl` to report whether loop closure was observed or only rejected, whether the pose graph actually reduced residuals, and whether no-loop LiDAR odometry drifted before loop closure corrected it.
+
 ## How it works
 
 Each scan is aligned against a TSDF rebuilt from a sliding window of recent scans (scan-to-local-map), then a fixed-lag window of poses is jointly optimized (Gauss-Newton / LM) with motion and anchor priors. Revisited places are detected against past nodes, verified by TSDF alignment, and closed with a global pose-graph solve. Code: `src/slamx/core/scan_ba/`. Design and roadmap: `notes/design_cuda_scan_ba.md`.

@@ -11,6 +11,7 @@ import yaml
 
 from slamx.cli import doctor_lib
 from slamx.cli import bench_lib
+from slamx.cli import cloud_analyzer
 from slamx.cli import datasets
 from slamx.cli import report_lib
 from slamx.cli import sweep_lib
@@ -1243,6 +1244,30 @@ def doctor(
     rep = doctor_lib.diagnose_run(run_dir)
     typer.echo(json.dumps(rep, indent=2, ensure_ascii=False))
     if any(f.get("level") == "error" for f in rep.get("findings", [])):
+        raise typer.Exit(1)
+
+
+@app.command("cloud-analyze")
+def cloud_analyze(
+    run_dir: Annotated[Path, typer.Argument(help="Run directory to analyze")],
+    baseline_run: Annotated[
+        Path | None,
+        typer.Option(
+            "--baseline-run",
+            help="Optional no-loop run directory for LiDAR odometry drift comparison",
+        ),
+    ] = None,
+    markdown: Annotated[
+        bool, typer.Option("--markdown", help="Render a compact Markdown report")
+    ] = False,
+) -> None:
+    """Analyze loop-closure viability and LiDAR odometry drift from run artifacts."""
+    rep = cloud_analyzer.CloudAnalyzer(run_dir, baseline_run=baseline_run).analyze()
+    if markdown:
+        typer.echo(cloud_analyzer.render_markdown(rep))
+    else:
+        typer.echo(json.dumps(rep, indent=2, ensure_ascii=False))
+    if not rep.get("ok", False):
         raise typer.Exit(1)
 
 
