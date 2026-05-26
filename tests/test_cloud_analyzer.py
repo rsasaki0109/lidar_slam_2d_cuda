@@ -31,6 +31,22 @@ def _make_run(tmp_path: Path) -> tuple[Path, Path]:
             {"i": 2, "x": 1.2, "y": 0.0, "theta": 0.0},
         ],
     )
+    _write_jsonl(
+        baseline / "telemetry.jsonl",
+        [
+            {
+                "type": "keyframe",
+                "schema_version": 1,
+                "node": i,
+                "stamp_ns": i,
+                "pose": {"x": float(i) * 0.6, "y": 0.0, "theta": 0.0},
+                "prediction": {"x": float(i) * 0.6, "y": 0.0, "theta": 0.0},
+                "scan_match_score": 0.0,
+                "pose_jump": 0.0,
+            }
+            for i in range(3)
+        ],
+    )
     _write_json(
         looped / "trajectory.json",
         [
@@ -105,7 +121,13 @@ def test_cloud_analyzer_detects_loop_and_odometry_drift(tmp_path: Path) -> None:
     assert rep["inference"]["loop_closure"]["status"] == "closed"
     assert rep["inference"]["loop_closure"]["can_close"] == "yes"
     assert rep["inference"]["lidar_odometry"]["status"] == "failing_drift_corrected_by_loop"
+    assert (
+        rep["inference"]["lidar_odometry"]["failure_mode"]
+        == "accumulated_drift_without_local_jump"
+    )
+    assert rep["inference"]["lidar_odometry"]["telemetry_source"] == "baseline_run"
     assert rep["facts"]["telemetry"]["loop_candidates"]["accepted"] == 1
+    assert rep["facts"]["baseline_telemetry"]["prediction_error"]["translation_m"]["max"] == 0.0
     assert rep["facts"]["baseline_vs_loop"]["baseline_start_end_gap_m"] == 1.2
     assert rep["facts"]["baseline_vs_loop"]["loop_start_end_gap_m"] == 0.02
 
@@ -123,3 +145,4 @@ def test_cloud_analyze_cli_outputs_json(tmp_path: Path) -> None:
     rep = json.loads(result.stdout)
     assert rep["inference"]["loop_closure"]["status"] == "closed"
     assert rep["inference"]["lidar_odometry"]["status"] == "failing_drift_corrected_by_loop"
+    assert rep["inference"]["lidar_odometry"]["telemetry_source"] == "baseline_run"
