@@ -54,6 +54,152 @@ def _trajectory_summary(traj: list[dict[str, float]]) -> dict[str, Any]:
     }
 
 
+def _trajectory_drift_components(
+    baseline: list[dict[str, float]],
+    looped: list[dict[str, float]],
+    n: int,
+) -> dict[str, list[float] | list[int]]:
+    nodes: list[int] = []
+    trans: list[float] = []
+    longitudinal: list[float] = []
+    lateral: list[float] = []
+    yaw: list[float] = []
+    for i in range(n):
+        node = int(looped[i].get("i", i))
+        # Correction vector that moves the no-loop baseline pose to the loop-closed pose.
+        dx = looped[i]["x"] - baseline[i]["x"]
+        dy = looped[i]["y"] - baseline[i]["y"]
+        th = looped[i]["theta"]
+        c = math.cos(th)
+        s = math.sin(th)
+        nodes.append(node)
+        trans.append(float(math.hypot(dx, dy)))
+        longitudinal.append(float(c * dx + s * dy))
+        lateral.append(float(-s * dx + c * dy))
+        yaw.append(_wrap_pi(looped[i]["theta"] - baseline[i]["theta"]))
+    return {
+        "nodes": nodes,
+        "translation_m": trans,
+        "longitudinal_m": longitudinal,
+        "lateral_m": lateral,
+        "yaw_rad": yaw,
+    }
+
+
+def _sample_drift_curve(
+    components: dict[str, list[float] | list[int]], limit: int = 24
+) -> list[dict[str, float | int]]:
+    nodes = components["nodes"]
+    trans = components["translation_m"]
+    longitudinal = components["longitudinal_m"]
+    lateral = components["lateral_m"]
+    yaw = components["yaw_rad"]
+    n = len(nodes)
+    if n == 0:
+        return []
+    if n <= limit:
+        idxs = list(range(n))
+    else:
+        idxs = sorted({round(i * (n - 1) / (limit - 1)) for i in range(limit)})
+    return [
+        {
+            "node": int(nodes[i]),
+            "translation_m": float(trans[i]),
+            "longitudinal_m": float(longitudinal[i]),
+            "lateral_m": float(lateral[i]),
+            "yaw_rad": float(yaw[i]),
+        }
+        for i in idxs
+    ]
+
+
+def _drift_threshold_crossings(
+    components: dict[str, list[float] | list[int]],
+    thresholds: tuple[float, ...] = (0.25, 0.5, 1.0),
+) -> dict[str, int | None]:
+    nodes = components["nodes"]
+    trans = components["translation_m"]
+    out: dict[str, int | None] = {}
+    for threshold in thresholds:
+        hit = next((int(nodes[i]) for i, v in enumerate(trans) if float(v) >= threshold), None)
+        out[f"{threshold:.2f}m"] = hit
+    return out
+
+
+def _max_window_growth(
+    components: dict[str, list[float] | list[int]],
+    window_nodes: int = 100,
+) -> dict[str, float | int | None]:
+    nodes = components["nodes"]
+    trans = components["translation_m"]
+    n = len(nodes)
+    if n < 2:
+        return {"window_nodes": window_nodes, "growth_m": 0.0, "start_node": None, "end_node": None}
+    step = min(window_nodes, n - 1)
+    best_i = step
+    best_growth = float(trans[step]) - float(trans[0])
+    for i in range(step, n):
+        growth = float(trans[i]) - float(trans[i - step])
+        if growth > best_growth:
+            best_growth = growth
+            best_i = i
+    return {
+        "window_nodes": int(step),
+        "growth_m": float(best_growth),
+        "start_node": int(nodes[best_i - step]),
+        "end_node": int(nodes[best_i]),
+    }
+
+
+def _drift_decomposition_summary(
+    components: dict[str, list[float] | list[int]],
+) -> dict[str, Any]:
+    nodes = components["nodes"]
+    trans = components["translation_m"]
+    longitudinal = components["longitudinal_m"]
+    lateral = components["lateral_m"]
+    yaw = components["yaw_rad"]
+    if not nodes:
+        return {}
+
+    abs_long = [abs(float(v)) for v in longitudinal]
+    abs_lat = [abs(float(v)) for v in lateral]
+    abs_yaw = [abs(float(v)) for v in yaw]
+    max_long_i = int(max(range(len(nodes)), key=lambda i: abs_long[i]))
+    max_lat_i = int(max(range(len(nodes)), key=lambda i: abs_lat[i]))
+    max_yaw_i = int(max(range(len(nodes)), key=lambda i: abs_yaw[i]))
+    end_long = float(longitudinal[-1])
+    end_lat = float(lateral[-1])
+    dominant = "longitudinal" if abs(end_long) >= abs(end_lat) else "lateral"
+
+    return {
+        "longitudinal_abs_m": series_summary(abs_long),
+        "lateral_abs_m": series_summary(abs_lat),
+        "yaw_abs_rad": series_summary(abs_yaw),
+        "end": {
+            "translation_m": float(trans[-1]),
+            "longitudinal_m": end_long,
+            "lateral_m": end_lat,
+            "yaw_rad": float(yaw[-1]),
+            "yaw_deg": math.degrees(float(yaw[-1])),
+            "dominant_translation_component": dominant,
+        },
+        "max_abs_longitudinal": {
+            "node": int(nodes[max_long_i]),
+            "value_m": float(longitudinal[max_long_i]),
+        },
+        "max_abs_lateral": {
+            "node": int(nodes[max_lat_i]),
+            "value_m": float(lateral[max_lat_i]),
+        },
+        "max_abs_yaw": {
+            "node": int(nodes[max_yaw_i]),
+            "value_rad": float(yaw[max_yaw_i]),
+            "value_deg": math.degrees(float(yaw[max_yaw_i])),
+        },
+    }
+
+
 def _trajectory_compare(
     baseline: list[dict[str, float]],
     looped: list[dict[str, float]],
@@ -62,24 +208,29 @@ def _trajectory_compare(
     if n == 0:
         return {"ok": False, "message": "empty trajectory"}
 
-    trans: list[float] = []
-    rot: list[float] = []
-    for i in range(n):
-        trans.append(
-            float(math.hypot(baseline[i]["x"] - looped[i]["x"], baseline[i]["y"] - looped[i]["y"]))
-        )
-        rot.append(abs(_wrap_pi(baseline[i]["theta"] - looped[i]["theta"])))
+    components = _trajectory_drift_components(baseline, looped, n)
+    nodes = components["nodes"]
+    trans = components["translation_m"]
+    yaw = components["yaw_rad"]
+    rot = [abs(float(v)) for v in yaw]
     worst_i = int(max(range(n), key=lambda i: trans[i]))
     return {
         "ok": True,
         "compared_poses": n,
-        "max_translation_m": trans[worst_i],
+        "max_translation_m": float(trans[worst_i]),
         "max_translation_index": worst_i,
-        "end_translation_m": trans[-1],
+        "max_translation_node": int(nodes[worst_i]),
+        "end_translation_m": float(trans[-1]),
         "translation_m": series_summary(trans),
         "max_rotation_rad": max(rot),
         "baseline_start_end_gap_m": _start_end_gap(baseline[:n]),
         "loop_start_end_gap_m": _start_end_gap(looped[:n]),
+        "drift_growth": {
+            "samples": _sample_drift_curve(components),
+            "threshold_crossings": _drift_threshold_crossings(components),
+            "max_growth_per_100_nodes": _max_window_growth(components, window_nodes=100),
+        },
+        "drift_decomposition": _drift_decomposition_summary(components),
     }
 
 
@@ -733,6 +884,11 @@ def render_markdown(rep: dict[str, Any]) -> str:
     ]
     if "baseline_vs_loop" in facts:
         cmp = facts["baseline_vs_loop"]
+        growth = cmp.get("drift_growth") or {}
+        crossings = growth.get("threshold_crossings") or {}
+        decomp = cmp.get("drift_decomposition") or {}
+        end_decomp = decomp.get("end") or {}
+        growth_100 = growth.get("max_growth_per_100_nodes") or {}
         lines.extend(
             [
                 f"- Baseline gap: {float(cmp.get('baseline_start_end_gap_m', 0.0)):.3f} m",
@@ -740,6 +896,32 @@ def render_markdown(rep: dict[str, Any]) -> str:
                 f"- Max correction: {float(cmp.get('max_translation_m', 0.0)):.3f} m",
             ]
         )
+        if end_decomp:
+            lines.extend(
+                [
+                    (
+                        "- End correction local frame: "
+                        f"longitudinal {float(end_decomp.get('longitudinal_m', 0.0)):.3f} m, "
+                        f"lateral {float(end_decomp.get('lateral_m', 0.0)):.3f} m, "
+                        f"yaw {float(end_decomp.get('yaw_deg', 0.0)):.2f} deg"
+                    ),
+                    (
+                        "- Dominant translation component: "
+                        f"{end_decomp.get('dominant_translation_component', 'unknown')}"
+                    ),
+                ]
+            )
+        if crossings:
+            lines.append(
+                "- Drift crossings: "
+                + ", ".join(f"{k} at node {v}" for k, v in crossings.items())
+            )
+        if growth_100:
+            lines.append(
+                "- Max 100-node drift growth: "
+                f"{float(growth_100.get('growth_m', 0.0)):.3f} m "
+                f"(nodes {growth_100.get('start_node')}->{growth_100.get('end_node')})"
+            )
     lines.append("")
     lines.append("## Findings")
     for f in rep.get("findings", []):
