@@ -76,6 +76,7 @@ def _trajectory_compare(
         "max_translation_m": trans[worst_i],
         "max_translation_index": worst_i,
         "end_translation_m": trans[-1],
+        "translation_m": series_summary(trans),
         "max_rotation_rad": max(rot),
         "baseline_start_end_gap_m": _start_end_gap(baseline[:n]),
         "loop_start_end_gap_m": _start_end_gap(looped[:n]),
@@ -100,6 +101,13 @@ def _node_sample(nodes: list[int], limit: int = 20) -> list[int]:
     if len(nodes) <= limit:
         return nodes
     return nodes[: limit // 2] + nodes[-(limit // 2) :]
+
+
+def _top_metric_nodes(
+    nodes: list[int], values: list[float], limit: int = 8
+) -> list[dict[str, Any]]:
+    pairs = sorted(zip(nodes, values, strict=False), key=lambda p: p[1], reverse=True)
+    return [{"node": int(n), "value": float(v)} for n, v in pairs[:limit]]
 
 
 @dataclass(frozen=True)
@@ -166,6 +174,8 @@ class CloudAnalyzer:
         }
 
         baseline_traj: list[dict[str, float]] | None = None
+        odom_telemetry = telemetry
+        odom_telemetry_source = "run"
         if self.baseline_run is not None:
             baseline_path = _run_file(self.baseline_run, "trajectory.json")
             if baseline_path.exists():
@@ -180,9 +190,21 @@ class CloudAnalyzer:
                         "path": str(baseline_path),
                     }
                 )
+            baseline_telem_path = _run_file(self.baseline_run, "telemetry.jsonl")
+            if baseline_telem_path.exists():
+                baseline_telemetry = self._telemetry_facts(load_jsonl(baseline_telem_path))
+                out["facts"]["baseline_telemetry"] = baseline_telemetry
+                odom_telemetry = baseline_telemetry
+                odom_telemetry_source = "baseline_run"
 
         loop_inf = self._infer_loop_closure(telemetry, trajectory)
-        odom_inf = self._infer_odometry(telemetry, trajectory, baseline_traj, traj)
+        odom_inf = self._infer_odometry(
+            odom_telemetry,
+            trajectory,
+            baseline_traj,
+            traj,
+            telemetry_source=odom_telemetry_source,
+        )
         out["inference"] = {
             "loop_closure": loop_inf,
             "lidar_odometry": odom_inf,
@@ -198,6 +220,46 @@ class CloudAnalyzer:
         keyframes = [e for e in evs if e.get("type") == "keyframe"]
         pose_jumps = [float(e.get("pose_jump", 0.0)) for e in keyframes]
         scores = [float(e.get("scan_match_score", 0.0)) for e in keyframes]
+        keyframe_nodes = [int(e.get("node", i)) for i, e in enumerate(keyframes)]
+
+        pred_trans: list[float] = []
+        pred_rot: list[float] = []
+        pred_nodes: list[int] = []
+        step_trans: list[float] = []
+        step_rot: list[float] = []
+        step_nodes: list[int] = []
+        last_pose: dict[str, Any] | None = None
+        for e in keyframes:
+            node = int(e.get("node", -1))
+            pose = e.get("pose") or {}
+            pred = e.get("prediction") or {}
+            if isinstance(pose, dict) and isinstance(pred, dict):
+                try:
+                    pred_trans.append(
+                        math.hypot(
+                            float(pose["x"]) - float(pred["x"]),
+                            float(pose["y"]) - float(pred["y"]),
+                        )
+                    )
+                    pred_rot.append(abs(_wrap_pi(float(pose["theta"]) - float(pred["theta"]))))
+                    pred_nodes.append(node)
+                except Exception:
+                    pass
+            if isinstance(pose, dict) and last_pose is not None:
+                try:
+                    step_trans.append(
+                        math.hypot(
+                            float(pose["x"]) - float(last_pose["x"]),
+                            float(pose["y"]) - float(last_pose["y"]),
+                        )
+                    )
+                    step_rot.append(abs(_wrap_pi(float(pose["theta"]) - float(last_pose["theta"]))))
+                    step_nodes.append(node)
+                except Exception:
+                    pass
+            if isinstance(pose, dict):
+                last_pose = pose
+
         low_score_nodes = [
             int(e.get("node", -1))
             for e in keyframes
@@ -265,10 +327,21 @@ class CloudAnalyzer:
             "keyframes": len(keyframes),
             "scan_match_score": series_summary(scores),
             "pose_jump": series_summary(pose_jumps),
+            "prediction_error": {
+                "translation_m": series_summary(pred_trans),
+                "rotation_rad": series_summary(pred_rot),
+                "worst_translation_nodes": _top_metric_nodes(pred_nodes, pred_trans),
+            },
+            "odometry_step": {
+                "translation_m": series_summary(step_trans),
+                "rotation_rad": series_summary(step_rot),
+                "worst_translation_nodes": _top_metric_nodes(step_nodes, step_trans),
+            },
             "low_score_nodes": _node_sample(low_score_nodes),
             "large_pose_jump_nodes": _node_sample(jump_warn_nodes),
             "very_large_pose_jump_nodes": _node_sample(jump_fail_nodes),
             "ambiguous_scan_match_nodes": _node_sample(ambiguous_nodes),
+            "worst_pose_jump_nodes": _top_metric_nodes(keyframe_nodes, pose_jumps),
             "scan_match_top2_margin": series_summary(margins),
             "loop_candidates": {
                 "events": len(candidate_events),
@@ -392,12 +465,15 @@ class CloudAnalyzer:
         trajectory: dict[str, Any],
         baseline: list[dict[str, float]] | None,
         looped: list[dict[str, float]],
+        *,
+        telemetry_source: str,
     ) -> dict[str, Any]:
         t = self.thresholds
         findings: list[dict[str, Any]] = []
         suggestions: list[dict[str, Any]] = []
         evidence: list[str] = []
         status = "unknown"
+        failure_mode = "unknown"
 
         if baseline is not None:
             cmp = _trajectory_compare(baseline, looped)
@@ -479,6 +555,12 @@ class CloudAnalyzer:
                 )
             evidence.append("baseline run not provided; drift verdict is weaker")
 
+        source = self._infer_odometry_failure_source(telemetry, status)
+        failure_mode = source["failure_mode"]
+        evidence.extend(source["evidence"])
+        findings.extend(source["findings"])
+        suggestions.extend(source["suggestions"])
+
         if telemetry["low_score_nodes"]:
             findings.append(
                 {
@@ -530,6 +612,101 @@ class CloudAnalyzer:
 
         return {
             "status": status,
+            "failure_mode": failure_mode,
+            "telemetry_source": telemetry_source,
+            "evidence": evidence,
+            "findings": findings,
+            "suggestions": suggestions,
+        }
+
+    def _infer_odometry_failure_source(
+        self, telemetry: dict[str, Any], status: str
+    ) -> dict[str, Any]:
+        t = self.thresholds
+        findings: list[dict[str, Any]] = []
+        suggestions: list[dict[str, Any]] = []
+        evidence: list[str] = []
+
+        jump = telemetry["pose_jump"]
+        score = telemetry["scan_match_score"]
+        pred = telemetry["prediction_error"]["translation_m"]
+        max_jump = float(jump.get("max", 0.0)) if jump.get("n", 0) else 0.0
+        p90_jump = float(jump.get("p90", 0.0)) if jump.get("n", 0) else 0.0
+        max_pred = float(pred.get("max", 0.0)) if pred.get("n", 0) else 0.0
+        score_min = float(score.get("min", 0.0)) if score.get("n", 0) else 0.0
+        drifting = status.startswith("failing") or status == "drifting"
+
+        evidence.append(f"pose_jump p90/max {p90_jump:.3f}/{max_jump:.3f}")
+        evidence.append(f"prediction error max {max_pred:.3f} m")
+        evidence.append(f"scan_match_score min {score_min:.3f}")
+
+        if telemetry["very_large_pose_jump_nodes"]:
+            return {
+                "failure_mode": "large_local_jump",
+                "evidence": evidence,
+                "findings": [
+                    {
+                        "level": "warn",
+                        "message": "odometry failure source looks like local scan-match jumps",
+                        "nodes": telemetry["very_large_pose_jump_nodes"],
+                    }
+                ],
+                "suggestions": [
+                    {
+                        "why": "large local pose jumps dominate the odometry failure",
+                        "try": [
+                            "inspect the listed nodes and surrounding scans",
+                            "tighten local matcher acceptance or add relocalization fallback",
+                        ],
+                    }
+                ],
+            }
+
+        if telemetry["low_score_nodes"]:
+            return {
+                "failure_mode": "low_score_scan_match",
+                "evidence": evidence,
+                "findings": [],
+                "suggestions": [],
+            }
+
+        if telemetry["ambiguous_scan_match_nodes"]:
+            return {
+                "failure_mode": "ambiguous_scan_match",
+                "evidence": evidence,
+                "findings": [],
+                "suggestions": [],
+            }
+
+        if drifting and max_jump <= t.pose_jump_warn and not telemetry["large_pose_jump_nodes"]:
+            findings.append(
+                {
+                    "level": "warn",
+                    "message": "odometry drift accumulates without large local scan-match jumps",
+                    "pose_jump_p90": p90_jump,
+                    "pose_jump_max": max_jump,
+                    "scan_match_score_min": score_min,
+                }
+            )
+            suggestions.append(
+                {
+                    "why": "drift appears to be accumulated small odometry bias, not a single jump",
+                    "try": [
+                        "measure closed-loop drift on no-loop runs as a primary odometry metric",
+                        "tune local scan-to-submap matching for systematic yaw/translation bias",
+                        "keep loop closure enabled for long runs and inspect first loop node",
+                    ],
+                }
+            )
+            return {
+                "failure_mode": "accumulated_drift_without_local_jump",
+                "evidence": evidence,
+                "findings": findings,
+                "suggestions": suggestions,
+            }
+
+        return {
+            "failure_mode": "no_clear_local_failure_source",
             "evidence": evidence,
             "findings": findings,
             "suggestions": suggestions,
@@ -549,6 +726,7 @@ def render_markdown(rep: dict[str, Any]) -> str:
         f"- Run: `{rep.get('run_dir')}`",
         f"- Loop closure: **{loop_inf.get('status', 'unknown')}**",
         f"- LiDAR odometry: **{odom.get('status', 'unknown')}**",
+        f"- Odometry failure mode: **{odom.get('failure_mode', 'unknown')}**",
         f"- Poses: {traj.get('poses')}",
         f"- Start/end gap: {float(traj.get('start_end_gap_m', 0.0)):.3f} m",
         f"- Loop accepted/rejected: {loop.get('accepted', 0)}/{loop.get('rejected', 0)}",
