@@ -61,6 +61,10 @@ class ScanBaEngineConfig:
     # counts for less than trusted odometry.
     loop_robust_loss: str = "cauchy"
     loop_robust_f_scale: float = 0.5
+    # Weight loop edges by their match confidence (inlier ratio). Off => every loop edge
+    # enters at weight 1.0, equal to trusted odometry (the pre-P-loop behaviour). Kept as
+    # a flag so the robust formulation can be A/B'd against the old plain solve.
+    loop_edge_weighting: bool = True
     # Run the fixed-lag window LM solve on the GPU (fused CUDA kernel, P2.5/P2.9).
     # Numerically identical to the CPU path; falls back to CPU if cupy/CUDA is absent.
     use_cuda: bool = False
@@ -459,7 +463,8 @@ class ScanBaEngine:
                 # down-weight by match confidence so a borderline loop (just over the
                 # inlier gate) influences the solve less than a strong one; the robust
                 # kernel then clips any that still turn out inconsistent.
-                self.graph.add_edge(Edge(i=j, j=node, rel=rel, weight=float(inl_ratio)))
+                w = float(inl_ratio) if self.cfg.loop_edge_weighting else 1.0
+                self.graph.add_edge(Edge(i=j, j=node, rel=rel, weight=w))
                 self._loop_edges.add((j, node))
                 added = True
                 if self.telemetry:
