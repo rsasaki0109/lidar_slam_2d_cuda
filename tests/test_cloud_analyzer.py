@@ -130,6 +130,17 @@ def test_cloud_analyzer_detects_loop_and_odometry_drift(tmp_path: Path) -> None:
     assert rep["facts"]["baseline_telemetry"]["prediction_error"]["translation_m"]["max"] == 0.0
     assert rep["facts"]["baseline_vs_loop"]["baseline_start_end_gap_m"] == 1.2
     assert rep["facts"]["baseline_vs_loop"]["loop_start_end_gap_m"] == 0.02
+    assert rep["facts"]["baseline_vs_loop"]["max_translation_node"] == 2
+    assert rep["facts"]["baseline_vs_loop"]["drift_growth"]["threshold_crossings"] == {
+        "0.25m": 2,
+        "0.50m": 2,
+        "1.00m": 2,
+    }
+    end_decomp = rep["facts"]["baseline_vs_loop"]["drift_decomposition"]["end"]
+    assert end_decomp["dominant_translation_component"] == "longitudinal"
+    assert end_decomp["longitudinal_m"] == -1.18
+    assert end_decomp["lateral_m"] == 0.0
+    assert end_decomp["yaw_rad"] == 0.0
 
 
 def test_cloud_analyze_cli_outputs_json(tmp_path: Path) -> None:
@@ -146,3 +157,4 @@ def test_cloud_analyze_cli_outputs_json(tmp_path: Path) -> None:
     assert rep["inference"]["loop_closure"]["status"] == "closed"
     assert rep["inference"]["lidar_odometry"]["status"] == "failing_drift_corrected_by_loop"
     assert rep["inference"]["lidar_odometry"]["telemetry_source"] == "baseline_run"
+    assert "drift_growth" in rep["facts"]["baseline_vs_loop"]
