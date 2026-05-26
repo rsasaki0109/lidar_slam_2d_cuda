@@ -147,6 +147,8 @@ def test_cloud_analyzer_detects_loop_and_odometry_drift(tmp_path: Path) -> None:
     assert hotspots[0]["growth_m"] == 1.18
     assert hotspots[0]["loop_events"]["accepted"] == 1
     assert hotspots[0]["failure_mode"] == "drift_growth_without_local_jump"
+    assert hotspots[0]["loop_effect"]["verdict"] == "accepted_at_window_end"
+    assert hotspots[0]["debug_target"] == "loop_closure_effective"
 
 
 def test_cloud_analyze_cli_outputs_json(tmp_path: Path) -> None:
@@ -165,6 +167,7 @@ def test_cloud_analyze_cli_outputs_json(tmp_path: Path) -> None:
     assert rep["inference"]["lidar_odometry"]["telemetry_source"] == "baseline_run"
     assert "drift_growth" in rep["facts"]["baseline_vs_loop"]
     assert rep["facts"]["baseline_vs_loop"]["hotspots"][0]["growth_m"] == 1.18
+    assert rep["facts"]["baseline_vs_loop"]["hotspots"][0]["debug_target"]
 
 
 def test_cloud_analyze_cli_outputs_hotspot_markdown(tmp_path: Path) -> None:
@@ -179,6 +182,51 @@ def test_cloud_analyze_cli_outputs_hotspot_markdown(tmp_path: Path) -> None:
     assert result.exit_code == 0, result.stdout + result.stderr
     assert "## Drift Hotspots" in result.stdout
     assert "| 1 | 0->2 | 1.180 | -1.180 | 0.000 | 0.00 |" in result.stdout
+    assert "accepted_at_window_end" in result.stdout
+
+
+def test_cloud_analyze_classifies_rejected_hotspot_target(tmp_path: Path) -> None:
+    baseline, looped = _make_run(tmp_path)
+    _write_jsonl(
+        looped / "telemetry.jsonl",
+        [
+            {
+                "type": "keyframe",
+                "schema_version": 1,
+                "node": 0,
+                "stamp_ns": 0,
+                "pose": {"x": 0.0, "y": 0.0, "theta": 0.0},
+                "prediction": {"x": 0.0, "y": 0.0, "theta": 0.0},
+                "scan_match_score": 0.0,
+                "pose_jump": 0.0,
+            },
+            {
+                "type": "loop_closure_candidates",
+                "schema_version": 1,
+                "node": 2,
+                "candidates": [{"i": 0, "j": 2, "score": -2.0, "accepted": False}],
+            },
+            {
+                "type": "loop_closure_rejected",
+                "schema_version": 1,
+                "node": 2,
+                "i": 0,
+                "j": 2,
+                "score": -2.0,
+                "reason": "score",
+            },
+        ],
+    )
+
+    rep = CloudAnalyzer(looped, baseline_run=baseline).analyze()
+    hotspot = rep["facts"]["baseline_vs_loop"]["hotspots"][0]
+
+    assert hotspot["loop_effect"]["verdict"] == "candidates_without_acceptance"
+    assert hotspot["debug_target"] == "candidate_scoring_or_acceptance_gate"
+    assert any(
+        f["message"] == "drift hotspot has loop candidates but no accepted loops"
+        for f in rep["findings"]
+    )
 
 
 def test_cloud_hotspot_reports_node_table(tmp_path: Path) -> None:
