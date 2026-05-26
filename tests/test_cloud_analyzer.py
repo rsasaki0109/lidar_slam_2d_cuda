@@ -141,6 +141,12 @@ def test_cloud_analyzer_detects_loop_and_odometry_drift(tmp_path: Path) -> None:
     assert end_decomp["longitudinal_m"] == -1.18
     assert end_decomp["lateral_m"] == 0.0
     assert end_decomp["yaw_rad"] == 0.0
+    hotspots = rep["facts"]["baseline_vs_loop"]["hotspots"]
+    assert hotspots[0]["start_node"] == 0
+    assert hotspots[0]["end_node"] == 2
+    assert hotspots[0]["growth_m"] == 1.18
+    assert hotspots[0]["loop_events"]["accepted"] == 1
+    assert hotspots[0]["failure_mode"] == "drift_growth_without_local_jump"
 
 
 def test_cloud_analyze_cli_outputs_json(tmp_path: Path) -> None:
@@ -158,6 +164,21 @@ def test_cloud_analyze_cli_outputs_json(tmp_path: Path) -> None:
     assert rep["inference"]["lidar_odometry"]["status"] == "failing_drift_corrected_by_loop"
     assert rep["inference"]["lidar_odometry"]["telemetry_source"] == "baseline_run"
     assert "drift_growth" in rep["facts"]["baseline_vs_loop"]
+    assert rep["facts"]["baseline_vs_loop"]["hotspots"][0]["growth_m"] == 1.18
+
+
+def test_cloud_analyze_cli_outputs_hotspot_markdown(tmp_path: Path) -> None:
+    baseline, looped = _make_run(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["cloud-analyze", str(looped), "--baseline-run", str(baseline), "--markdown"],
+    )
+
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert "## Drift Hotspots" in result.stdout
+    assert "| 1 | 0->2 | 1.180 | -1.180 | 0.000 | 0.00 |" in result.stdout
 
 
 def test_cloud_hotspot_reports_node_table(tmp_path: Path) -> None:
