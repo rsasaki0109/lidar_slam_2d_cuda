@@ -180,6 +180,45 @@ def _metrics_in_range(
     return series_summary(vals)
 
 
+def _optimization_summary_in_range(
+    evs: list[dict[str, Any]],
+    start_node: int,
+    end_node: int,
+) -> dict[str, Any]:
+    selected = [
+        e
+        for e in evs
+        if e.get("type") == "optimization"
+        and start_node <= int(e.get("node", -1)) <= end_node
+    ]
+    reductions: list[float] = []
+    after: list[float] = []
+    max_nfev_hits = 0
+    success = 0
+    nodes: list[int] = []
+    for e in selected:
+        nodes.append(int(e.get("node", -1)))
+        success += 1 if bool(e.get("success", False)) else 0
+        before = e.get("residual_rms_before")
+        after_raw = e.get("residual_rms_after")
+        if after_raw is not None:
+            after.append(float(after_raw))
+        if before is not None and after_raw is not None and float(after_raw) > 0.0:
+            reductions.append(float(before) / float(after_raw))
+        nfev = e.get("nfev")
+        max_nfev = e.get("max_nfev")
+        if nfev is not None and max_nfev is not None and int(nfev) >= int(max_nfev):
+            max_nfev_hits += 1
+    return {
+        "events": len(selected),
+        "success": success,
+        "nodes": _node_sample(sorted(set(nodes)), limit=10),
+        "residual_rms_after": series_summary(after),
+        "residual_rms_reduction": series_summary(reductions),
+        "max_nfev_hits": max_nfev_hits,
+    }
+
+
 def _monotonic_growth_fraction(xs: list[float]) -> float:
     if len(xs) < 2:
         return 1.0
@@ -204,10 +243,116 @@ def _hotspot_failure_mode(
     return "mixed_local_odometry_signal"
 
 
+def _loop_effect_in_window(
+    components: dict[str, list[float] | list[int]],
+    loop_events: dict[int, dict[str, Any]],
+    start_i: int,
+    end_i: int,
+) -> dict[str, Any]:
+    nodes = [int(n) for n in components["nodes"]]
+    trans = [float(v) for v in components["translation_m"]]
+    start_node = nodes[start_i]
+    end_node = nodes[end_i]
+    events = [
+        (int(node), ev)
+        for node, ev in loop_events.items()
+        if start_node <= int(node) <= end_node
+    ]
+    if not events:
+        return {"verdict": "no_loop_events", "accepted_nodes": []}
+
+    accepted_nodes = sorted(
+        node for node, ev in events if int(ev.get("accepted", 0)) > 0
+    )
+    rejected_nodes = sorted(
+        node for node, ev in events if int(ev.get("rejected", 0)) > 0
+    )
+    candidate_nodes = sorted(
+        node for node, ev in events if int(ev.get("candidate_count", 0)) > 0
+    )
+    if not accepted_nodes:
+        return {
+            "verdict": "candidates_without_acceptance",
+            "candidate_nodes": _node_sample(candidate_nodes, limit=10),
+            "rejected_nodes": _node_sample(rejected_nodes, limit=10),
+            "accepted_nodes": [],
+        }
+
+    node_index = {node: i for i, node in enumerate(nodes)}
+    accepted_idx = [
+        node_index[node]
+        for node in accepted_nodes
+        if start_i <= node_index.get(node, -1) <= end_i
+    ]
+    if not accepted_idx:
+        return {
+            "verdict": "accepted_events_without_pose_sample",
+            "accepted_nodes": _node_sample(accepted_nodes, limit=10),
+        }
+
+    first_i = min(accepted_idx)
+    last_i = max(accepted_idx)
+    start_corr = trans[start_i]
+    first_corr = trans[first_i]
+    last_corr = trans[last_i]
+    end_corr = trans[end_i]
+    after_first = trans[first_i : end_i + 1]
+    after_last = trans[last_i : end_i + 1]
+    reduction_after_first = first_corr - min(after_first)
+    reduction_after_last = last_corr - min(after_last)
+    growth_after_last = end_corr - last_corr
+    if last_i == end_i:
+        verdict = "accepted_at_window_end"
+    elif growth_after_last > 0.05:
+        verdict = "accepted_loops_but_correction_keeps_growing"
+    elif max(reduction_after_first, reduction_after_last) > 0.05:
+        verdict = "accepted_loops_reduce_correction"
+    else:
+        verdict = "accepted_loops_hold_correction"
+    return {
+        "verdict": verdict,
+        "accepted_nodes": _node_sample(accepted_nodes, limit=10),
+        "first_accepted_node": nodes[first_i],
+        "last_accepted_node": nodes[last_i],
+        "start_correction_m": start_corr,
+        "first_accepted_correction_m": first_corr,
+        "last_accepted_correction_m": last_corr,
+        "end_correction_m": end_corr,
+        "growth_before_first_accept_m": first_corr - start_corr,
+        "growth_after_last_accept_m": growth_after_last,
+        "reduction_after_first_accept_m": reduction_after_first,
+        "reduction_after_last_accept_m": reduction_after_last,
+    }
+
+
+def _hotspot_debug_target(
+    row: dict[str, Any],
+    thresholds: CloudAnalyzerThresholds,
+) -> str:
+    loops = row["loop_events"]
+    effect = row["loop_effect"]
+    delta = row["delta"]
+    opt = row["optimization"]
+    if loops["candidate_count"] == 0 and loops["accepted"] == 0 and loops["rejected"] == 0:
+        return "loop_candidate_search"
+    if loops["accepted"] == 0:
+        return "candidate_scoring_or_acceptance_gate"
+    if abs(float(delta["yaw_deg"])) > 1.0:
+        return "yaw_refinement"
+    reductions = opt.get("residual_rms_reduction", {})
+    max_reduction = float(reductions.get("max", 0.0)) if reductions.get("n", 0) else 0.0
+    if opt.get("events", 0) == 0 or max_reduction < thresholds.residual_reduction_good:
+        return "pose_graph_edge_weight_or_optimizer"
+    if effect.get("verdict") == "accepted_loops_but_correction_keeps_growing":
+        return "odometry_bias_after_loop"
+    return "loop_closure_effective"
+
+
 def _make_hotspot_row(
     components: dict[str, list[float] | list[int]],
     metrics: dict[int, dict[str, Any]],
     loop_events: dict[int, dict[str, Any]],
+    opt_evs: list[dict[str, Any]],
     start_i: int,
     end_i: int,
     *,
@@ -245,6 +390,8 @@ def _make_hotspot_row(
         "correction_m": series_summary(correction),
         "monotonic_growth_fraction": _monotonic_growth_fraction(correction),
         "loop_events": _event_counts_in_range(loop_events, start_node, end_node),
+        "loop_effect": _loop_effect_in_window(components, loop_events, start_i, end_i),
+        "optimization": _optimization_summary_in_range(opt_evs, start_node, end_node),
         "pose_jump": _metrics_in_range(metrics, start_node, end_node, "pose_jump"),
         "scan_match_score": _metrics_in_range(
             metrics, start_node, end_node, "scan_match_score"
@@ -257,6 +404,7 @@ def _make_hotspot_row(
         ),
     }
     row["failure_mode"] = _hotspot_failure_mode(row, thresholds)
+    row["debug_target"] = _hotspot_debug_target(row, thresholds)
     return row
 
 
@@ -264,6 +412,7 @@ def _detect_drift_hotspots(
     components: dict[str, list[float] | list[int]],
     metrics: dict[int, dict[str, Any]],
     loop_events: dict[int, dict[str, Any]],
+    opt_evs: list[dict[str, Any]],
     *,
     thresholds: CloudAnalyzerThresholds,
     window_nodes: int = 100,
@@ -295,6 +444,7 @@ def _detect_drift_hotspots(
             components,
             metrics,
             loop_events,
+            opt_evs,
             start_i,
             end_i,
             window_nodes=step,
@@ -305,6 +455,96 @@ def _detect_drift_hotspots(
         if len(out) >= limit:
             break
     return out
+
+
+def _hotspot_diagnostics(
+    hotspots: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    findings: list[dict[str, Any]] = []
+    suggestions: list[dict[str, Any]] = []
+    for h in hotspots[:3]:
+        target = h.get("debug_target", "unknown")
+        effect = h.get("loop_effect") or {}
+        nodes = {"start": h.get("start_node"), "end": h.get("end_node")}
+        common = {
+            "nodes": nodes,
+            "growth_m": h.get("growth_m"),
+            "rank": h.get("rank"),
+        }
+        if target == "candidate_scoring_or_acceptance_gate":
+            findings.append(
+                {
+                    "level": "warn",
+                    "message": "drift hotspot has loop candidates but no accepted loops",
+                    **common,
+                }
+            )
+            suggestions.append(
+                {
+                    "why": "candidate scoring or acceptance gates block this hotspot",
+                    "try": [
+                        "inspect rejected loop candidates in this node window",
+                        "compare yaw/refined score before and after ICP",
+                        "relax acceptance gates only around this diagnostic window",
+                    ],
+                }
+            )
+        elif target == "yaw_refinement":
+            findings.append(
+                {
+                    "level": "warn",
+                    "message": "drift hotspot is dominated by yaw-sensitive loop correction",
+                    **common,
+                }
+            )
+            suggestions.append(
+                {
+                    "why": "accepted loops coincide with a yaw correction hotspot",
+                    "try": [
+                        "increase yaw refinement hypotheses around accepted loop candidates",
+                        "verify candidate ranking after yaw refinement",
+                        "inspect whether lateral drift changes sign across the window",
+                    ],
+                }
+            )
+        elif target == "pose_graph_edge_weight_or_optimizer":
+            findings.append(
+                {
+                    "level": "warn",
+                    "message": "accepted loops have weak optimization evidence in hotspot",
+                    **common,
+                }
+            )
+            suggestions.append(
+                {
+                    "why": "loop edges are accepted but pose-graph residual reduction is weak",
+                    "try": [
+                        "inspect loop edge information weights for this node window",
+                        "raise loop-edge weight or lower odometry-edge confidence in a test run",
+                        "check optimizer nfev/max_nfev and final residuals",
+                    ],
+                }
+            )
+        elif target == "odometry_bias_after_loop":
+            findings.append(
+                {
+                    "level": "warn",
+                    "message": "correction keeps growing after accepted loop closures",
+                    "growth_after_last_accept_m": effect.get("growth_after_last_accept_m"),
+                    **common,
+                }
+            )
+            suggestions.append(
+                {
+                    "why": "loop closure works but odometry bias continues after the loop event",
+                    "try": [
+                        "focus local odometry bias tuning after the last accepted loop node",
+                        "compare submap size and yaw bias on this exact interval",
+                        "use cloud-hotspot on the reported node window for node-level metrics",
+                    ],
+                }
+            )
+    return findings, suggestions
 
 
 def _drift_decomposition_summary(
@@ -615,6 +855,7 @@ class CloudAnalyzer:
                     components,
                     _keyframe_metrics_by_node(metric_evs),
                     _loop_events_by_node(evs),
+                    evs,
                     thresholds=self.thresholds,
                     window_nodes=self.hotspot_window_nodes,
                     limit=self.hotspot_limit,
@@ -640,6 +881,10 @@ class CloudAnalyzer:
         out["findings"].extend(odom_inf["findings"])
         out["suggestions"].extend(loop_inf["suggestions"])
         out["suggestions"].extend(odom_inf["suggestions"])
+        hotspots = out.get("facts", {}).get("baseline_vs_loop", {}).get("hotspots", [])
+        hotspot_findings, hotspot_suggestions = _hotspot_diagnostics(hotspots)
+        out["findings"].extend(hotspot_findings)
+        out["suggestions"].extend(hotspot_suggestions)
         return out
 
     def _telemetry_facts(self, evs: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1534,14 +1779,15 @@ def render_markdown(rep: dict[str, Any]) -> str:
                     "",
                     (
                         "| rank | nodes | growth_m | long_m | lat_m | yaw_deg | "
-                        "loop | mode |"
+                        "loop | effect | target | mode |"
                     ),
-                    "|---:|---|---:|---:|---:|---:|---|---|",
+                    "|---:|---|---:|---:|---:|---:|---|---|---|---|",
                 ]
             )
             for h in hotspots:
                 h_delta = h.get("delta") or {}
                 h_loop = h.get("loop_events") or {}
+                h_effect = h.get("loop_effect") or {}
                 loop_label = (
                     f"cand:{h_loop.get('candidate_count', 0)} "
                     f"acc:{h_loop.get('accepted', 0)} "
@@ -1555,7 +1801,10 @@ def render_markdown(rep: dict[str, Any]) -> str:
                     f"{float(h_delta.get('longitudinal_m', 0.0)):.3f} | "
                     f"{float(h_delta.get('lateral_m', 0.0)):.3f} | "
                     f"{float(h_delta.get('yaw_deg', 0.0)):.2f} | "
-                    f"{loop_label} | {h.get('failure_mode', 'unknown')} |"
+                    f"{loop_label} | "
+                    f"{h_effect.get('verdict', 'unknown')} | "
+                    f"{h.get('debug_target', 'unknown')} | "
+                    f"{h.get('failure_mode', 'unknown')} |"
                 )
     lines.append("")
     lines.append("## Findings")
