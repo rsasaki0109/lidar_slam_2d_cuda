@@ -93,6 +93,11 @@ def _scan_ba_engine_from_config(cfg: dict[str, Any], telemetry: JsonlTelemetry |
         loop_robust_loss=str(sb.get("loop_robust_loss", "cauchy")),
         loop_robust_f_scale=float(sb.get("loop_robust_f_scale", 0.5)),
         loop_edge_weighting=bool(sb.get("loop_edge_weighting", True)),
+        loop_init_yaw_offsets_rad=tuple(
+            float(v) for v in sb.get("loop_init_yaw_offsets_rad", (0.0,))
+        ),
+        loop_ambiguity_margin=float(sb.get("loop_ambiguity_margin", 0.0)),
+        loop_solution_sep_m=float(sb.get("loop_solution_sep_m", 0.5)),
         use_cuda=bool(sb.get("use_cuda", False)),
         use_joint=bool(sb.get("use_joint", False)),
         joint_sdf_prior_info=float(sb.get("joint_sdf_prior_info", 10.0)),

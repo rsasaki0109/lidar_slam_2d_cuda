@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import math
 import pickle
 import time
 from pathlib import Path
@@ -68,6 +69,28 @@ def _variant_cfg(base: dict, variant: str) -> dict:
             sb.update(loop_robust_loss="linear", loop_robust_f_scale=1.0, loop_edge_weighting=False)
         else:
             sb.update(loop_robust_loss="cauchy", loop_robust_f_scale=0.5, loop_edge_weighting=True)
+    elif variant in ("loop_multiinit", "loop_robust_widecand", "loop_multiinit_widecand"):
+        # P-loop2 detection-side robustness. loop_multiinit = shipped robust + a yaw
+        # sweep and geometric verification at the tight gates (a no-regression check on
+        # the clean bag). The *_widecand pair loosens CANDIDATE generation (loop_dist_m
+        # 2.5->5.0) so the detector proposes wrong revisits a single align mis-registers;
+        # comparing single-init robust vs multi-init shows whether the yaw sweep + rival
+        # verification hold up once detection is stressed (the detection-side analogue of
+        # the loose-gate experiment).
+        sb.update(
+            loop_closure_enabled=True,
+            loop_robust_loss="cauchy",
+            loop_robust_f_scale=0.5,
+            loop_edge_weighting=True,
+        )
+        if variant != "loop_robust_widecand":
+            sb.update(
+                loop_init_yaw_offsets_rad=(0.0, math.pi / 2, -math.pi / 2, math.pi),
+                loop_ambiguity_margin=0.3,
+                loop_solution_sep_m=0.5,
+            )
+        if variant != "loop_multiinit":
+            sb.update(loop_dist_m=5.0)
     else:
         raise ValueError(f"unknown variant {variant!r}")
     return cfg
