@@ -5,7 +5,7 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
-from slamx.cli.cloud_analyzer import CloudAnalyzer
+from slamx.cli.cloud_analyzer import CloudAnalyzer, CloudHotspotAnalyzer
 from slamx.cli.main import app
 
 
@@ -158,3 +158,49 @@ def test_cloud_analyze_cli_outputs_json(tmp_path: Path) -> None:
     assert rep["inference"]["lidar_odometry"]["status"] == "failing_drift_corrected_by_loop"
     assert rep["inference"]["lidar_odometry"]["telemetry_source"] == "baseline_run"
     assert "drift_growth" in rep["facts"]["baseline_vs_loop"]
+
+
+def test_cloud_hotspot_reports_node_table(tmp_path: Path) -> None:
+    baseline, looped = _make_run(tmp_path)
+
+    rep = CloudHotspotAnalyzer(
+        looped,
+        baseline_run=baseline,
+        start_node=1,
+        end_node=2,
+    ).analyze()
+
+    assert rep["ok"] is True
+    assert rep["summary"]["drift_growth_m"] == 1.18
+    assert rep["summary"]["delta"]["dominant_translation_component"] == "longitudinal"
+    assert rep["summary"]["loop_events"]["accepted"] == 1
+    assert rep["summary"]["telemetry_source"] == "baseline_run"
+    assert [r["node"] for r in rep["table"]] == [1, 2]
+    assert rep["table"][1]["correction_m"] == 1.18
+    assert rep["table"][1]["longitudinal_m"] == -1.18
+    assert rep["table"][1]["loop_event_label"] == "cand:1 acc:1"
+
+
+def test_cloud_hotspot_cli_outputs_markdown(tmp_path: Path) -> None:
+    baseline, looped = _make_run(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "cloud-hotspot",
+            str(looped),
+            "--baseline-run",
+            str(baseline),
+            "--start-node",
+            "1",
+            "--end-node",
+            "2",
+            "--markdown",
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert "# Cloud Hotspot" in result.stdout
+    assert "Drift growth: 1.180 m" in result.stdout
+    assert "| 2 | 1.180 | -1.180 | 0.000 | 0.00 |" in result.stdout
