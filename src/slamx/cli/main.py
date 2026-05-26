@@ -1271,6 +1271,37 @@ def cloud_analyze(
         raise typer.Exit(1)
 
 
+@app.command("cloud-hotspot")
+def cloud_hotspot(
+    run_dir: Annotated[Path, typer.Argument(help="Run directory to inspect")],
+    baseline_run: Annotated[
+        Path,
+        typer.Option(
+            "--baseline-run",
+            help="No-loop run directory used for drift correction comparison",
+        ),
+    ],
+    start_node: Annotated[int, typer.Option("--start-node", help="Start node, inclusive")],
+    end_node: Annotated[int, typer.Option("--end-node", help="End node, inclusive")],
+    markdown: Annotated[
+        bool, typer.Option("--markdown", help="Render a compact Markdown report")
+    ] = False,
+) -> None:
+    """Inspect a drift-growth hotspot interval node-by-node."""
+    rep = cloud_analyzer.CloudHotspotAnalyzer(
+        run_dir,
+        baseline_run=baseline_run,
+        start_node=start_node,
+        end_node=end_node,
+    ).analyze()
+    if markdown:
+        typer.echo(cloud_analyzer.render_hotspot_markdown(rep))
+    else:
+        typer.echo(json.dumps(rep, indent=2, ensure_ascii=False))
+    if not rep.get("ok", False):
+        raise typer.Exit(1)
+
+
 @app.command()
 def report(
     run_dir: Annotated[Path, typer.Argument(help="Run directory")],

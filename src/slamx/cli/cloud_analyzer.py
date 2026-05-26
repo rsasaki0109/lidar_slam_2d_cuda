@@ -261,6 +261,104 @@ def _top_metric_nodes(
     return [{"node": int(n), "value": float(v)} for n, v in pairs[:limit]]
 
 
+def _keyframe_metrics_by_node(evs: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
+    rows: dict[int, dict[str, Any]] = {}
+    last_pose: dict[str, Any] | None = None
+    for e in evs:
+        if e.get("type") != "keyframe":
+            continue
+        node = int(e.get("node", -1))
+        pose = e.get("pose") or {}
+        pred = e.get("prediction") or {}
+        pred_error_m = None
+        pred_error_yaw_rad = None
+        step_m = None
+        step_yaw_rad = None
+        if isinstance(pose, dict) and isinstance(pred, dict):
+            try:
+                pred_error_m = float(
+                    math.hypot(
+                        float(pose["x"]) - float(pred["x"]),
+                        float(pose["y"]) - float(pred["y"]),
+                    )
+                )
+                pred_error_yaw_rad = abs(_wrap_pi(float(pose["theta"]) - float(pred["theta"])))
+            except Exception:
+                pass
+        if isinstance(pose, dict) and last_pose is not None:
+            try:
+                step_m = float(
+                    math.hypot(
+                        float(pose["x"]) - float(last_pose["x"]),
+                        float(pose["y"]) - float(last_pose["y"]),
+                    )
+                )
+                step_yaw_rad = abs(_wrap_pi(float(pose["theta"]) - float(last_pose["theta"])))
+            except Exception:
+                pass
+        rows[node] = {
+            "pose_jump": float(e.get("pose_jump", 0.0)),
+            "scan_match_score": float(e.get("scan_match_score", 0.0)),
+            "prediction_error_m": pred_error_m,
+            "prediction_error_yaw_rad": pred_error_yaw_rad,
+            "odometry_step_m": step_m,
+            "odometry_step_yaw_rad": step_yaw_rad,
+        }
+        if isinstance(pose, dict):
+            last_pose = pose
+    return rows
+
+
+def _loop_events_by_node(evs: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
+    rows: dict[int, dict[str, Any]] = {}
+
+    def ensure(node: int) -> dict[str, Any]:
+        if node not in rows:
+            rows[node] = {
+                "candidate_count": 0,
+                "accepted": 0,
+                "rejected": 0,
+                "accepted_edges": [],
+                "rejected_edges": [],
+            }
+        return rows[node]
+
+    for e in evs:
+        typ = e.get("type")
+        if typ == "loop_closure_candidates":
+            node = int(e.get("node", -1))
+            cands = e.get("candidates")
+            ensure(node)["candidate_count"] += len(cands) if isinstance(cands, list) else 0
+        elif typ == "loop_closure_accepted":
+            node = int(e.get("node", -1))
+            row = ensure(node)
+            row["accepted"] += 1
+            row["accepted_edges"].append([int(e.get("i", -1)), int(e.get("j", -1))])
+        elif typ == "loop_closure_rejected":
+            node = int(e.get("node", -1))
+            row = ensure(node)
+            row["rejected"] += 1
+            row["rejected_edges"].append([int(e.get("i", -1)), int(e.get("j", -1))])
+    return rows
+
+
+def _loop_event_label(ev: dict[str, Any] | None) -> str:
+    if not ev:
+        return "-"
+    parts: list[str] = []
+    if ev.get("candidate_count", 0):
+        parts.append(f"cand:{int(ev['candidate_count'])}")
+    if ev.get("accepted", 0):
+        parts.append(f"acc:{int(ev['accepted'])}")
+    if ev.get("rejected", 0):
+        parts.append(f"rej:{int(ev['rejected'])}")
+    return " ".join(parts) if parts else "-"
+
+
+def _summary_or_empty(xs: list[float | None]) -> dict[str, Any]:
+    return series_summary([float(x) for x in xs if x is not None])
+
+
 @dataclass(frozen=True)
 class CloudAnalyzerThresholds:
     odom_gap_warn_m: float = 0.5
@@ -862,6 +960,334 @@ class CloudAnalyzer:
             "findings": findings,
             "suggestions": suggestions,
         }
+
+
+class CloudHotspotAnalyzer:
+    """Inspect a concrete drift-growth node interval."""
+
+    def __init__(
+        self,
+        run_dir: Path,
+        *,
+        baseline_run: Path,
+        start_node: int,
+        end_node: int,
+        thresholds: CloudAnalyzerThresholds | None = None,
+    ) -> None:
+        self.run_dir = run_dir
+        self.baseline_run = baseline_run
+        self.start_node = min(int(start_node), int(end_node))
+        self.end_node = max(int(start_node), int(end_node))
+        self.thresholds = thresholds or CloudAnalyzerThresholds()
+
+    def analyze(self) -> dict[str, Any]:
+        traj_path = _run_file(self.run_dir, "trajectory.json")
+        telem_path = _run_file(self.run_dir, "telemetry.jsonl")
+        baseline_traj_path = _run_file(self.baseline_run, "trajectory.json")
+        baseline_telem_path = _run_file(self.baseline_run, "telemetry.jsonl")
+
+        out: dict[str, Any] = {
+            "run_dir": str(self.run_dir),
+            "baseline_run": str(self.baseline_run),
+            "start_node": self.start_node,
+            "end_node": self.end_node,
+            "ok": True,
+            "summary": {},
+            "table": [],
+            "findings": [],
+            "suggestions": [],
+        }
+
+        missing = [
+            str(p)
+            for p in (traj_path, telem_path, baseline_traj_path)
+            if not p.exists()
+        ]
+        if missing:
+            out["ok"] = False
+            out["findings"].append(
+                {
+                    "level": "error",
+                    "message": "missing required hotspot artifacts",
+                    "paths": missing,
+                }
+            )
+            return out
+
+        loop_traj = _load_trajectory(traj_path)
+        baseline_traj = _load_trajectory(baseline_traj_path)
+        n = min(len(loop_traj), len(baseline_traj))
+        components = _trajectory_drift_components(baseline_traj, loop_traj, n)
+        loop_evs = load_jsonl(telem_path)
+        metric_evs = load_jsonl(baseline_telem_path) if baseline_telem_path.exists() else loop_evs
+        telemetry_source = "baseline_run" if baseline_telem_path.exists() else "run"
+        metrics = _keyframe_metrics_by_node(metric_evs)
+        loop_events = _loop_events_by_node(loop_evs)
+
+        table = self._build_table(components, metrics, loop_events)
+        out["table"] = table
+        if not table:
+            out["ok"] = False
+            out["findings"].append(
+                {
+                    "level": "error",
+                    "message": "no trajectory nodes overlap requested hotspot interval",
+                }
+            )
+            return out
+
+        out["summary"] = self._summarize(table, telemetry_source=telemetry_source)
+        findings, suggestions = self._findings(table, out["summary"])
+        out["findings"].extend(findings)
+        out["suggestions"].extend(suggestions)
+        return out
+
+    def _build_table(
+        self,
+        components: dict[str, list[float] | list[int]],
+        metrics: dict[int, dict[str, Any]],
+        loop_events: dict[int, dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        nodes = components["nodes"]
+        trans = components["translation_m"]
+        longitudinal = components["longitudinal_m"]
+        lateral = components["lateral_m"]
+        yaw = components["yaw_rad"]
+        rows: list[dict[str, Any]] = []
+        for i, node_raw in enumerate(nodes):
+            node = int(node_raw)
+            if not (self.start_node <= node <= self.end_node):
+                continue
+            m = metrics.get(node, {})
+            ev = loop_events.get(node)
+            rows.append(
+                {
+                    "node": node,
+                    "correction_m": float(trans[i]),
+                    "longitudinal_m": float(longitudinal[i]),
+                    "lateral_m": float(lateral[i]),
+                    "yaw_rad": float(yaw[i]),
+                    "yaw_deg": math.degrees(float(yaw[i])),
+                    "pose_jump": m.get("pose_jump"),
+                    "scan_match_score": m.get("scan_match_score"),
+                    "prediction_error_m": m.get("prediction_error_m"),
+                    "odometry_step_m": m.get("odometry_step_m"),
+                    "loop_event": ev or {},
+                    "loop_event_label": _loop_event_label(ev),
+                }
+            )
+        return rows
+
+    def _summarize(self, table: list[dict[str, Any]], *, telemetry_source: str) -> dict[str, Any]:
+        start = table[0]
+        end = table[-1]
+        loop_accepted = sum(int(r["loop_event"].get("accepted", 0)) for r in table)
+        loop_rejected = sum(int(r["loop_event"].get("rejected", 0)) for r in table)
+        loop_candidates = sum(int(r["loop_event"].get("candidate_count", 0)) for r in table)
+        correction = [float(r["correction_m"]) for r in table]
+        monotonic_steps = sum(
+            1 for a, b in zip(correction, correction[1:]) if float(b) >= float(a)
+        )
+        dominant = "longitudinal"
+        if abs(float(end["lateral_m"]) - float(start["lateral_m"])) > abs(
+            float(end["longitudinal_m"]) - float(start["longitudinal_m"])
+        ):
+            dominant = "lateral"
+        return {
+            "telemetry_source": telemetry_source,
+            "node_count": len(table),
+            "node_span": {"start": int(start["node"]), "end": int(end["node"])},
+            "drift_growth_m": float(end["correction_m"] - start["correction_m"]),
+            "start_correction": self._correction_view(start),
+            "end_correction": self._correction_view(end),
+            "delta": {
+                "correction_m": float(end["correction_m"] - start["correction_m"]),
+                "longitudinal_m": float(end["longitudinal_m"] - start["longitudinal_m"]),
+                "lateral_m": float(end["lateral_m"] - start["lateral_m"]),
+                "yaw_rad": float(end["yaw_rad"] - start["yaw_rad"]),
+                "yaw_deg": float(end["yaw_deg"] - start["yaw_deg"]),
+                "dominant_translation_component": dominant,
+            },
+            "correction_m": series_summary(correction),
+            "pose_jump": _summary_or_empty([r["pose_jump"] for r in table]),
+            "scan_match_score": _summary_or_empty([r["scan_match_score"] for r in table]),
+            "prediction_error_m": _summary_or_empty([r["prediction_error_m"] for r in table]),
+            "odometry_step_m": _summary_or_empty([r["odometry_step_m"] for r in table]),
+            "monotonic_growth_fraction": (
+                monotonic_steps / max(1, len(correction) - 1)
+            ),
+            "loop_events": {
+                "candidate_count": loop_candidates,
+                "accepted": loop_accepted,
+                "rejected": loop_rejected,
+            },
+        }
+
+    @staticmethod
+    def _correction_view(row: dict[str, Any]) -> dict[str, float | int]:
+        return {
+            "node": int(row["node"]),
+            "correction_m": float(row["correction_m"]),
+            "longitudinal_m": float(row["longitudinal_m"]),
+            "lateral_m": float(row["lateral_m"]),
+            "yaw_rad": float(row["yaw_rad"]),
+            "yaw_deg": float(row["yaw_deg"]),
+        }
+
+    def _findings(
+        self, table: list[dict[str, Any]], summary: dict[str, Any]
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        t = self.thresholds
+        findings: list[dict[str, Any]] = []
+        suggestions: list[dict[str, Any]] = []
+        growth = float(summary["drift_growth_m"])
+        pose_jump = summary["pose_jump"]
+        score = summary["scan_match_score"]
+        pred = summary["prediction_error_m"]
+        loops = summary["loop_events"]
+        delta = summary["delta"]
+
+        if growth > 0.25:
+            findings.append(
+                {
+                    "level": "warn",
+                    "message": "drift grows inside hotspot interval",
+                    "growth_m": growth,
+                    "nodes": summary["node_span"],
+                }
+            )
+        if loops["accepted"] == 0 and loops["rejected"] == 0 and loops["candidate_count"] == 0:
+            findings.append(
+                {
+                    "level": "info",
+                    "message": "no loop-closure events occur inside hotspot interval",
+                }
+            )
+        else:
+            findings.append(
+                {
+                    "level": "info",
+                    "message": "loop-closure events occur inside hotspot interval",
+                    **loops,
+                }
+            )
+        if pose_jump.get("max", 0.0) <= t.pose_jump_warn and score.get("min", 0.0) > t.low_score:
+            findings.append(
+                {
+                    "level": "warn",
+                    "message": "drift grows while local scan-match metrics look normal",
+                    "pose_jump_max": pose_jump.get("max", 0.0),
+                    "scan_match_score_min": score.get("min", 0.0),
+                    "prediction_error_max_m": pred.get("max", 0.0),
+                }
+            )
+            suggestions.append(
+                {
+                    "why": "hotspot does not look like a single local matcher jump",
+                    "try": [
+                        "inspect systematic yaw/translation bias over this interval",
+                        "compare local submap window sizes on only this node range",
+                        "try stronger yaw refinement or candidate re-ranking",
+                    ],
+                }
+            )
+        if abs(float(delta["yaw_deg"])) > 1.0:
+            findings.append(
+                {
+                    "level": "warn",
+                    "message": "yaw correction changes across hotspot",
+                    "delta_yaw_deg": delta["yaw_deg"],
+                }
+            )
+        if abs(float(delta["longitudinal_m"])) >= abs(float(delta["lateral_m"])):
+            findings.append(
+                {
+                    "level": "info",
+                    "message": "hotspot correction is dominated by longitudinal drift",
+                    "delta_longitudinal_m": delta["longitudinal_m"],
+                    "delta_lateral_m": delta["lateral_m"],
+                }
+            )
+        else:
+            findings.append(
+                {
+                    "level": "info",
+                    "message": "hotspot correction is dominated by lateral drift",
+                    "delta_longitudinal_m": delta["longitudinal_m"],
+                    "delta_lateral_m": delta["lateral_m"],
+                }
+            )
+        return findings, suggestions
+
+
+def render_hotspot_markdown(rep: dict[str, Any]) -> str:
+    summary = rep.get("summary", {})
+    loops = summary.get("loop_events", {})
+    delta = summary.get("delta", {})
+    lines = [
+        "# Cloud Hotspot",
+        "",
+        f"- Run: `{rep.get('run_dir')}`",
+        f"- Baseline: `{rep.get('baseline_run')}`",
+        f"- Nodes: {rep.get('start_node')} -> {rep.get('end_node')}",
+        f"- Telemetry source: `{summary.get('telemetry_source', 'unknown')}`",
+        f"- Drift growth: {float(summary.get('drift_growth_m', 0.0)):.3f} m",
+        (
+            "- Delta local frame: "
+            f"longitudinal {float(delta.get('longitudinal_m', 0.0)):.3f} m, "
+            f"lateral {float(delta.get('lateral_m', 0.0)):.3f} m, "
+            f"yaw {float(delta.get('yaw_deg', 0.0)):.2f} deg"
+        ),
+        (
+            "- Loop events: "
+            f"cand {loops.get('candidate_count', 0)}, "
+            f"acc {loops.get('accepted', 0)}, rej {loops.get('rejected', 0)}"
+        ),
+        "",
+        "## Findings",
+    ]
+    for f in rep.get("findings", []):
+        lines.append(f"- `{f.get('level')}` {f.get('message')}")
+    lines.extend(
+        [
+            "",
+            "## Node Table",
+            "",
+            (
+                "| node | corr_m | long_m | lat_m | yaw_deg | pose_jump | "
+                "score | pred_err_m | step_m | loop |"
+            ),
+            "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+        ]
+    )
+    for r in rep.get("table", []):
+        lines.append(
+            "| "
+            f"{int(r['node'])} | "
+            f"{float(r['correction_m']):.3f} | "
+            f"{float(r['longitudinal_m']):.3f} | "
+            f"{float(r['lateral_m']):.3f} | "
+            f"{float(r['yaw_deg']):.2f} | "
+            f"{_fmt_optional(r.get('pose_jump'))} | "
+            f"{_fmt_optional(r.get('scan_match_score'))} | "
+            f"{_fmt_optional(r.get('prediction_error_m'))} | "
+            f"{_fmt_optional(r.get('odometry_step_m'))} | "
+            f"{r.get('loop_event_label', '-')} |"
+        )
+    lines.append("")
+    if rep.get("suggestions"):
+        lines.append("## Suggestions")
+        for s in rep.get("suggestions", []):
+            tries = "; ".join(str(x) for x in s.get("try", []))
+            lines.append(f"- {s.get('why')}: {tries}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _fmt_optional(value: Any) -> str:
+    if value is None:
+        return "-"
+    return f"{float(value):.3f}"
 
 
 def render_markdown(rep: dict[str, Any]) -> str:
