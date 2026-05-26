@@ -101,6 +101,28 @@ def test_engine_from_config_reads_gradient_mask_preprocess_options() -> None:
     assert eng.cfg.preprocess.gradient_mask_window == 1
 
 
+def test_engine_from_config_reads_loop_optimization_options() -> None:
+    eng = _engine_from_config(
+        {
+            "slam": {
+                "optimize_on_loop_closure": True,
+                "loop_optimize_min_interval_keyframes": 100,
+                "loop_edge_weight": 2.5,
+                "pose_graph": {"max_iterations": 3, "max_nfev_cap": 120},
+                "loop_pose_graph": {"max_nfev_cap": 32},
+            }
+        },
+        telemetry=None,
+    )
+
+    assert eng.cfg.optimize_on_loop_closure is True
+    assert eng.cfg.loop_optimize_min_interval_keyframes == 100
+    assert eng.cfg.loop_edge_weight == 2.5
+    assert eng.cfg.loop_pose_graph is not None
+    assert eng.cfg.loop_pose_graph.max_iterations == 3
+    assert eng.cfg.loop_pose_graph.max_nfev_cap == 32
+
+
 def test_replay_can_optimize_once_at_end(tmp_path: Path) -> None:
     root = Path(__file__).resolve().parents[1]
     fixture = root / "examples" / "fixture_scans.jsonl"
