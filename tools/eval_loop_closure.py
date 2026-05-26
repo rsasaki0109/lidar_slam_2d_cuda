@@ -69,6 +69,19 @@ def _variant_cfg(base: dict, variant: str) -> dict:
             sb.update(loop_robust_loss="linear", loop_robust_f_scale=1.0, loop_edge_weighting=False)
         else:
             sb.update(loop_robust_loss="cauchy", loop_robust_f_scale=0.5, loop_edge_weighting=True)
+    elif variant == "loop_multiinit_noverify":
+        # yaw sweep ON, geometric verification OFF -- isolates the sweep's effect from
+        # the verification's. If this matches loop_robust (single init) the sweep changes
+        # no accepted edge (revisits are at similar headings), so any regression in
+        # loop_multiinit is purely the verification's false rejections.
+        sb.update(
+            loop_closure_enabled=True,
+            loop_robust_loss="cauchy",
+            loop_robust_f_scale=0.5,
+            loop_edge_weighting=True,
+            loop_init_yaw_offsets_rad=(0.0, math.pi / 2, -math.pi / 2, math.pi),
+            loop_ambiguity_margin=0.0,
+        )
     elif variant in ("loop_multiinit", "loop_robust_widecand", "loop_multiinit_widecand"):
         # P-loop2 detection-side robustness. loop_multiinit = shipped robust + a yaw
         # sweep and geometric verification at the tight gates (a no-regression check on
