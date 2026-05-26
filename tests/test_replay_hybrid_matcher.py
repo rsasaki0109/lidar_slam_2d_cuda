@@ -126,6 +126,9 @@ def test_replay_can_optimize_once_at_end(tmp_path: Path) -> None:
                 "      trim_fraction: 0.10",
                 "  optimize_every_n_keyframes: 0",
                 "  final_optimize_at_end: true",
+                "  final_pose_graph:",
+                "    max_iterations: 1",
+                "    max_nfev_cap: 32",
                 "  loop_detection:",
                 "    enabled: false",
             ]
@@ -163,3 +166,5 @@ def test_replay_can_optimize_once_at_end(tmp_path: Path) -> None:
 
     assert optimizations
     assert optimizations[-1]["node"] == len(traj) - 1
+    assert optimizations[-1]["final"] is True
+    assert optimizations[-1]["max_nfev"] == 32

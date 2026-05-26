@@ -221,8 +221,8 @@ class PoseGraph:
         rms0 = float(np.sqrt(np.mean(r0 * r0))) if r0.size else 0.0
         maxabs0 = float(np.max(np.abs(r0))) if r0.size else 0.0
 
-        n_edges = max(1, n_edges)
-        max_nfev = int(self.cfg.max_iterations) * n_edges * 3
+        n_edges_for_budget = max(1, n_edges)
+        max_nfev = int(self.cfg.max_iterations) * n_edges_for_budget * 3
         if self.cfg.max_nfev_cap is not None:
             max_nfev = min(max_nfev, int(self.cfg.max_nfev_cap))
         max_nfev = max(max_nfev, 32)
@@ -248,6 +248,13 @@ class PoseGraph:
         return {
             "success": bool(r.success),
             "cost": float(r.cost),
+            "n_poses": int(n_poses),
+            "n_edges": int(n_edges),
+            "nfev": int(r.nfev),
+            "njev": int(r.njev) if r.njev is not None else None,
+            "max_nfev": int(max_nfev),
+            "robust_loss": str(self.cfg.robust_loss),
+            "robust_f_scale": float(self.cfg.robust_f_scale),
             "residual_rms_before": rms0,
             "residual_rms_after": rmsf,
             "residual_maxabs_before": maxabs0,

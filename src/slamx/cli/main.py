@@ -37,6 +37,16 @@ bench_app = typer.Typer(no_args_is_help=True, add_completion=False)
 app.add_typer(bench_app, name="bench")
 
 
+def _pose_graph_config_from_dict(pg: dict[str, Any]) -> PoseGraphConfig:
+    cap_raw = pg.get("max_nfev_cap")
+    return PoseGraphConfig(
+        max_iterations=int(pg.get("max_iterations", 50)),
+        max_nfev_cap=int(cap_raw) if cap_raw is not None else None,
+        robust_loss=str(pg.get("robust_loss", "linear")),
+        robust_f_scale=float(pg.get("robust_f_scale", 1.0)),
+    )
+
+
 def _scan_ba_engine_from_config(cfg: dict[str, Any], telemetry: JsonlTelemetry | None):
     from slamx.core.preprocess.pipeline import PreprocessConfig
     from slamx.core.scan_ba.engine import ScanBaEngine, ScanBaEngineConfig
@@ -129,7 +139,6 @@ def _engine_from_config(cfg: dict[str, Any], telemetry: JsonlTelemetry | None):
     loop_corr = loop.get("correlative_grid", {}) or {}
     loop_icp_cfg = loop.get("icp", {}) or {}
     pg = slam.get("pose_graph", {}) or {}
-    cap_raw = pg.get("max_nfev_cap")
     adapt_from = slam.get("optimize_adaptive_from_node")
     adapt_min = slam.get("optimize_min_interval_for_long_runs", 200)
     skip_opt_from = slam.get("pose_graph_skip_optimization_from_node")
@@ -214,10 +223,7 @@ def _engine_from_config(cfg: dict[str, Any], telemetry: JsonlTelemetry | None):
             downsample_stride=int(submap.get("downsample_stride", 2)),
         ),
         optimize_every_n_keyframes=opt_every,
-        pose_graph=PoseGraphConfig(
-            max_iterations=int(pg.get("max_iterations", 50)),
-            max_nfev_cap=int(cap_raw) if cap_raw is not None else None,
-        ),
+        pose_graph=_pose_graph_config_from_dict(pg),
         optimize_adaptive_from_node=int(adapt_from) if adapt_from is not None else None,
         optimize_min_interval_for_long_runs=int(adapt_min),
         pose_graph_skip_optimization_from_node=(
@@ -365,8 +371,17 @@ def replay(
             ogm.update(pose_map=pose, scan=scan)
 
     if final_optimize_at_end and len(eng.graph.poses) > 1:
-        opt = eng.graph.optimize()
-        telem.emit("optimization", {"node": len(eng.graph.poses) - 1, **opt})
+        final_pg = cfg.get("slam", {}).get("final_pose_graph", {}) or {}
+        old_pg_cfg = eng.graph.cfg
+        if final_pg:
+            pg_cfg_dict = dict((cfg.get("slam", {}).get("pose_graph", {}) or {}))
+            pg_cfg_dict.update(final_pg)
+            eng.graph.cfg = _pose_graph_config_from_dict(pg_cfg_dict)
+        try:
+            opt = eng.graph.optimize()
+        finally:
+            eng.graph.cfg = old_pg_cfg
+        telem.emit("optimization", {"node": len(eng.graph.poses) - 1, "final": True, **opt})
 
     save_trajectory_json(out / "trajectory.json", eng.graph.poses, eng.stamps_ns)
     if ogm is not None:
