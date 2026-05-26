@@ -140,6 +140,7 @@ def _engine_from_config(cfg: dict[str, Any], telemetry: JsonlTelemetry | None):
     loop_corr = loop.get("correlative_grid", {}) or {}
     loop_icp_cfg = loop.get("icp", {}) or {}
     pg = slam.get("pose_graph", {}) or {}
+    loop_pg = slam.get("loop_pose_graph", {}) or {}
     adapt_from = slam.get("optimize_adaptive_from_node")
     adapt_min = slam.get("optimize_min_interval_for_long_runs", 200)
     skip_opt_from = slam.get("pose_graph_skip_optimization_from_node")
@@ -225,6 +226,14 @@ def _engine_from_config(cfg: dict[str, Any], telemetry: JsonlTelemetry | None):
         ),
         optimize_every_n_keyframes=opt_every,
         pose_graph=_pose_graph_config_from_dict(pg),
+        loop_pose_graph=(
+            _pose_graph_config_from_dict({**pg, **loop_pg}) if loop_pg else None
+        ),
+        optimize_on_loop_closure=bool(slam.get("optimize_on_loop_closure", False)),
+        loop_optimize_min_interval_keyframes=int(
+            slam.get("loop_optimize_min_interval_keyframes", 0)
+        ),
+        loop_edge_weight=float(slam.get("loop_edge_weight", 1.0)),
         optimize_adaptive_from_node=int(adapt_from) if adapt_from is not None else None,
         optimize_min_interval_for_long_runs=int(adapt_min),
         pose_graph_skip_optimization_from_node=(
