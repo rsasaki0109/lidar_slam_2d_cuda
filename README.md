@@ -25,7 +25,9 @@ slamx replay <bag> --topic <scan_topic> --config configs/scan_ba_backpack_s300.y
 slamx cloud-analyze runs/loop_run --baseline-run runs/no_loop_run --markdown
 ```
 
-`CloudAnalyzer` reads `trajectory.json` and `telemetry.jsonl` to report whether loop closure was observed or only rejected, whether the pose graph actually reduced residuals, and whether no-loop LiDAR odometry drifted before loop closure corrected it.
+`CloudAnalyzer` reads `trajectory.json` and `telemetry.jsonl` to report whether loop closure was observed or only rejected,
+whether the pose graph actually reduced residuals, whether no-loop LiDAR odometry drifted before loop closure corrected it,
+and whether that odometry failure looks like local scan-match jumps or accumulated small bias.
 
 ## How it works
 
