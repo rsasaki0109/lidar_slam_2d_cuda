@@ -202,6 +202,14 @@ def _engine_from_config(cfg: dict[str, Any], telemetry: JsonlTelemetry | None):
             selection_rotation_weight=float(
                 hybrid_refinement.get("selection_rotation_weight", 0.0)
             ),
+            prediction_yaw_tiebreak_enabled=bool(
+                hybrid_refinement.get("prediction_yaw_tiebreak_enabled", False)
+            ),
+            tiebreak_score_eps=float(hybrid_refinement.get("tiebreak_score_eps", 0.0)),
+            tiebreak_rms_eps=float(hybrid_refinement.get("tiebreak_rms_eps", 0.0)),
+            tiebreak_yaw_margin_rad=float(
+                hybrid_refinement.get("tiebreak_yaw_margin_rad", 0.0)
+            ),
         ),
         hybrid_fallback=HybridFallbackConfig(
             enabled=bool(hybrid_fallback.get("enabled", False)),

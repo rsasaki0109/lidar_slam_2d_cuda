@@ -33,6 +33,13 @@ class HybridRefinementConfig:
     min_angular_dist_deg: float = 0.0
     selection_translation_weight: float = 0.0
     selection_rotation_weight: float = 0.0
+    # Opt-in narrow tiebreaker: when scores are essentially tied and ICP RMS
+    # is not worse, prefer the refined candidate with the smallest prediction
+    # yaw delta. Default OFF (enabled=False).
+    prediction_yaw_tiebreak_enabled: bool = False
+    tiebreak_score_eps: float = 0.0
+    tiebreak_rms_eps: float = 0.0
+    tiebreak_yaw_margin_rad: float = 0.0
 
 
 def _candidate_pose(candidate: tuple[float, float, float, float]) -> Pose2:
@@ -58,6 +65,66 @@ def _refinement_selection_score(
         - float(cfg.selection_rotation_weight) * yaw_delta
     )
     return score, trans_delta, yaw_delta
+
+
+def _final_rms_of(diag: dict[str, object]) -> float | None:
+    rms = diag.get("final_rms")
+    if rms is None:
+        return None
+    try:
+        return float(rms)
+    except (TypeError, ValueError):
+        return None
+
+
+def _apply_prediction_yaw_tiebreak(
+    cfg: HybridRefinementConfig,
+    diags: list[dict[str, object]],
+    best_idx: int,
+) -> tuple[int, dict[str, object]]:
+    """If scores are tied and ICP RMS is not worse, swap to the candidate with
+    the smallest prediction yaw delta. Returns (new_best_idx, tiebreak_diag)."""
+    tiebreak_diag: dict[str, object] = {
+        "enabled": bool(cfg.prediction_yaw_tiebreak_enabled),
+        "applied": False,
+        "from_index": int(best_idx),
+        "to_index": int(best_idx),
+    }
+    if not cfg.prediction_yaw_tiebreak_enabled:
+        return best_idx, tiebreak_diag
+    if len(diags) < 2:
+        return best_idx, tiebreak_diag
+
+    score_eps = float(cfg.tiebreak_score_eps)
+    rms_eps = float(cfg.tiebreak_rms_eps)
+    yaw_margin = float(cfg.tiebreak_yaw_margin_rad)
+
+    best_diag = diags[best_idx]
+    best_sel_score = float(best_diag.get("selection_score", float("-inf")))
+    best_yaw = float(best_diag.get("prediction_delta_yaw_rad", 0.0))
+    best_rms = _final_rms_of(best_diag)
+
+    chosen_idx = best_idx
+    chosen_yaw = best_yaw
+    for idx, d in enumerate(diags):
+        if idx == best_idx:
+            continue
+        sel = float(d.get("selection_score", float("-inf")))
+        if best_sel_score - sel > score_eps:
+            continue
+        cand_rms = _final_rms_of(d)
+        if best_rms is not None and cand_rms is not None and cand_rms - best_rms > rms_eps:
+            continue
+        cand_yaw = float(d.get("prediction_delta_yaw_rad", 0.0))
+        if chosen_yaw - cand_yaw <= yaw_margin:
+            continue
+        chosen_idx = idx
+        chosen_yaw = cand_yaw
+
+    if chosen_idx != best_idx:
+        tiebreak_diag["applied"] = True
+        tiebreak_diag["to_index"] = int(chosen_idx)
+    return chosen_idx, tiebreak_diag
 
 
 class HybridScanMatcher:
@@ -113,10 +180,10 @@ class HybridScanMatcher:
         prediction_map: Pose2,
         ref_points_xy_map: np.ndarray,
         predictions: list[Pose2],
-    ) -> tuple[MatchResult, list[dict[str, object]], int]:
+    ) -> tuple[MatchResult, list[dict[str, object]], int, dict[str, object]]:
         best_idx = 0
-        best_mr: MatchResult | None = None
         best_selection_score = float("-inf")
+        mrs: list[MatchResult] = []
         diags: list[dict[str, object]] = []
         for idx, pred in enumerate(predictions):
             mr = self._refine.match(
@@ -141,12 +208,15 @@ class HybridScanMatcher:
                     "final_rms": icp_diag.get("final_rms"),
                 }
             )
-            if best_mr is None or selection_score > best_selection_score:
+            mrs.append(mr)
+            if idx == 0 or selection_score > best_selection_score:
                 best_idx = idx
-                best_mr = mr
                 best_selection_score = selection_score
-        assert best_mr is not None
-        return best_mr, diags, best_idx
+        assert mrs, "predictions must be non-empty"
+        best_idx, tiebreak_diag = _apply_prediction_yaw_tiebreak(
+            self._refinement_cfg, diags, best_idx
+        )
+        return mrs[best_idx], diags, best_idx, tiebreak_diag
 
     def _match_once(
         self,
@@ -155,20 +225,20 @@ class HybridScanMatcher:
         prediction_map: Pose2,
         ref_points_xy_map: np.ndarray,
         coarse_matcher: CorrelativeScanMatcher,
-    ) -> tuple[MatchResult, MatchResult, list[dict[str, object]], int]:
+    ) -> tuple[MatchResult, MatchResult, list[dict[str, object]], int, dict[str, object]]:
         coarse = coarse_matcher.match(
             scan=scan,
             prediction_map=prediction_map,
             ref_points_xy_map=ref_points_xy_map,
         )
         predictions = self._select_refinement_predictions(coarse)
-        refined, refined_diags, best_idx = self._refine_candidates(
+        refined, refined_diags, best_idx, tiebreak_diag = self._refine_candidates(
             scan=scan,
             prediction_map=prediction_map,
             ref_points_xy_map=ref_points_xy_map,
             predictions=predictions,
         )
-        return coarse, refined, refined_diags, best_idx
+        return coarse, refined, refined_diags, best_idx, tiebreak_diag
 
     def match(
         self,
@@ -177,7 +247,7 @@ class HybridScanMatcher:
         prediction_map: Pose2,
         ref_points_xy_map: np.ndarray,
     ) -> MatchResult:
-        coarse, refined, refined_diags, best_idx = self._match_once(
+        coarse, refined, refined_diags, best_idx, tiebreak_diag = self._match_once(
             scan=scan,
             prediction_map=prediction_map,
             ref_points_xy_map=ref_points_xy_map,
@@ -191,7 +261,13 @@ class HybridScanMatcher:
             and refined.score <= float(self._fallback_cfg.trigger_score)
         ):
             fallback_diag["attempted"] = True
-            fallback_coarse, fallback_refined, fallback_diags, fallback_best_idx = self._match_once(
+            (
+                fallback_coarse,
+                fallback_refined,
+                fallback_diags,
+                fallback_best_idx,
+                fallback_tiebreak_diag,
+            ) = self._match_once(
                 scan=scan,
                 prediction_map=prediction_map,
                 ref_points_xy_map=ref_points_xy_map,
@@ -206,6 +282,7 @@ class HybridScanMatcher:
                     "min_score_gain": float(self._fallback_cfg.min_score_gain),
                     "fallback_best_candidate_index": int(fallback_best_idx),
                     "fallback_refined_candidates": fallback_diags,
+                    "fallback_tiebreak": fallback_tiebreak_diag,
                 }
             )
             if fallback_refined.score > refined.score + float(self._fallback_cfg.min_score_gain):
@@ -213,6 +290,7 @@ class HybridScanMatcher:
                 refined = fallback_refined
                 refined_diags = fallback_diags
                 best_idx = fallback_best_idx
+                tiebreak_diag = fallback_tiebreak_diag
                 used_fallback = True
 
         return MatchResult(
@@ -230,6 +308,7 @@ class HybridScanMatcher:
                 "coarse": coarse.diagnostics,
                 "refined": refined.diagnostics,
                 "refined_candidates": refined_diags,
+                "tiebreak": tiebreak_diag,
                 "fallback": fallback_diag,
             },
         )
