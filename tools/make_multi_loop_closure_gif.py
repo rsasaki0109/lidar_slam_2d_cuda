@@ -13,9 +13,9 @@ directly from telemetry.
 
 Example:
   env -u PYTHONPATH .venv/bin/python tools/make_multi_loop_closure_gif.py \
-    --run runs/iilabs_elevator_full_vscan_bb_loop_elevator_sparse_accept2_final_cap32_20260527 \
-    --baseline-run runs/iilabs_elevator_full_vscan_bb \
-    --title "iilabs elevator: failed odometry -> multi-loop closure" \
+    --run runs/iilabs_elevator_full_vscan_bb_loop_elevator_sparse_final_cap32_yawtop3_20260528 \
+    --baseline-run runs/iilabs_elevator_full_vscan_bb_yawtop3_20260528 \
+    --title "iilabs elevator: improved odometry -> multi-loop closure" \
     --out docs/assets/multi_loop_closure.gif
 """
 from __future__ import annotations

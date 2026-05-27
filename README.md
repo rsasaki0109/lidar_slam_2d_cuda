@@ -2,7 +2,7 @@
 
 ![slamx multi-loop closure](docs/assets/multi_loop_closure.gif)
 
-*Multi-loop closure on the full iilabs elevator run. The GIF first draws the failed no-loop LiDAR odometry in red, then snaps it to the loop-closed pose graph in cyan while revealing the real accepted loop edges from `telemetry.jsonl`. The start/end loop gap shrinks from 1.27 m to 0.007 m with 195 accepted loop closures; ATE on the same timestamps improves from 0.599 m to 0.030 m after alignment.*
+*Multi-loop closure on the full iilabs elevator run. The GIF first draws the improved no-loop LiDAR odometry in red, then snaps it to the loop-closed pose graph in cyan while revealing the real accepted loop edges from `telemetry.jsonl`. The start/end loop gap shrinks from 0.384 m to 0.019 m with 168 accepted loop closures; ATE on the same timestamps improves from 0.170 m to 0.031 m after alignment.*
 
 2D LiDAR SLAM with a fixed-lag, **scan-level bundle-adjustment** core (CUDA-bound). ROS-free, CLI-first.
 
