@@ -10,6 +10,7 @@ Implements the key algorithm from Hess et al., 2016:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
 import numpy as np
 from scipy.ndimage import gaussian_filter
@@ -17,6 +18,14 @@ from scipy.ndimage import gaussian_filter
 from slamx.core.local_matching.icp import IcpConfig, IcpScanMatcher
 from slamx.core.local_matching.hybrid import HybridRefinementConfig
 from slamx.core.types import LaserScan, MatchResult, Pose2
+
+
+def _candidate_pose(candidate: tuple[float, float, float, float]) -> Pose2:
+    return Pose2(float(candidate[0]), float(candidate[1]), float(candidate[2]))
+
+
+def _angular_distance(a: float, b: float) -> float:
+    return abs(math.atan2(math.sin(a - b), math.cos(a - b)))
 
 
 @dataclass
@@ -283,6 +292,77 @@ class HybridBBScanMatcher:
         self._refine = IcpScanMatcher(icp)
         self._refinement_cfg = refinement or HybridRefinementConfig()
 
+    def _distinct_enough(self, pose: Pose2, selected: list[Pose2]) -> bool:
+        min_linear = max(0.0, float(self._refinement_cfg.min_linear_dist_m))
+        min_angular = math.radians(max(0.0, float(self._refinement_cfg.min_angular_dist_deg)))
+        for prev in selected:
+            if (
+                math.hypot(pose.x - prev.x, pose.y - prev.y) <= min_linear
+                and _angular_distance(pose.theta, prev.theta) <= min_angular
+            ):
+                return False
+        return True
+
+    def _select_refinement_predictions(self, coarse: MatchResult) -> list[Pose2]:
+        top_k = max(1, int(self._refinement_cfg.top_k))
+        selected: list[Pose2] = [coarse.pose_map]
+        if top_k <= 1:
+            return selected
+
+        for cand in coarse.candidates:
+            pose = _candidate_pose(cand)
+            if self._distinct_enough(pose, selected):
+                selected.append(pose)
+                if len(selected) >= top_k:
+                    return selected
+
+        step_deg = float(self._refinement_cfg.min_angular_dist_deg)
+        if step_deg <= 0.0:
+            step_deg = max(float(self._coarse.cfg.angular_step_deg), 0.5)
+        step = math.radians(step_deg)
+        for k in range(1, top_k + 1):
+            for sign in (1.0, -1.0):
+                pose = Pose2(
+                    coarse.pose_map.x,
+                    coarse.pose_map.y,
+                    coarse.pose_map.theta + sign * k * step,
+                )
+                if self._distinct_enough(pose, selected):
+                    selected.append(pose)
+                    if len(selected) >= top_k:
+                        return selected
+        return selected
+
+    def _refine_candidates(
+        self,
+        *,
+        scan: LaserScan,
+        ref_points_xy_map: np.ndarray,
+        predictions: list[Pose2],
+    ) -> tuple[MatchResult, list[dict[str, object]], int]:
+        best_idx = 0
+        best_mr: MatchResult | None = None
+        diags: list[dict[str, object]] = []
+        for idx, pred in enumerate(predictions):
+            mr = self._refine.match(
+                scan=scan,
+                prediction_map=pred,
+                ref_points_xy_map=ref_points_xy_map,
+            )
+            icp_diag = mr.diagnostics.get("icp", {}) if isinstance(mr.diagnostics, dict) else {}
+            diags.append(
+                {
+                    "prediction": {"x": pred.x, "y": pred.y, "theta": pred.theta},
+                    "score": float(mr.score),
+                    "final_rms": icp_diag.get("final_rms"),
+                }
+            )
+            if best_mr is None or mr.score > best_mr.score:
+                best_idx = idx
+                best_mr = mr
+        assert best_mr is not None
+        return best_mr, diags, best_idx
+
     def match(
         self,
         *,
@@ -296,11 +376,11 @@ class HybridBBScanMatcher:
             ref_points_xy_map=ref_points_xy_map,
         )
 
-        # Refine the best coarse result with ICP
-        refined = self._refine.match(
+        predictions = self._select_refinement_predictions(coarse)
+        refined, refined_diags, best_idx = self._refine_candidates(
             scan=scan,
-            prediction_map=coarse.pose_map,
             ref_points_xy_map=ref_points_xy_map,
+            predictions=predictions,
         )
 
         return MatchResult(
@@ -311,8 +391,11 @@ class HybridBBScanMatcher:
                 "hybrid_bb": {
                     "coarse_score": float(coarse.score),
                     "refined_score": float(refined.score),
+                    "n_refined_candidates": len(refined_diags),
+                    "best_candidate_index": int(best_idx),
                 },
                 "coarse": coarse.diagnostics,
                 "refined": refined.diagnostics,
+                "refined_candidates": refined_diags,
             },
         )
