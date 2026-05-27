@@ -1260,9 +1260,25 @@ def cloud_analyze(
     markdown: Annotated[
         bool, typer.Option("--markdown", help="Render a compact Markdown report")
     ] = False,
+    hotspot_window_nodes: Annotated[
+        int,
+        typer.Option(
+            "--hotspot-window-nodes",
+            help="Node window used for automatic drift-hotspot detection",
+        ),
+    ] = 100,
+    hotspot_limit: Annotated[
+        int,
+        typer.Option("--hotspot-limit", help="Maximum automatic drift hotspots to report"),
+    ] = 5,
 ) -> None:
     """Analyze loop-closure viability and LiDAR odometry drift from run artifacts."""
-    rep = cloud_analyzer.CloudAnalyzer(run_dir, baseline_run=baseline_run).analyze()
+    rep = cloud_analyzer.CloudAnalyzer(
+        run_dir,
+        baseline_run=baseline_run,
+        hotspot_window_nodes=hotspot_window_nodes,
+        hotspot_limit=hotspot_limit,
+    ).analyze()
     if markdown:
         typer.echo(cloud_analyzer.render_markdown(rep))
     else:

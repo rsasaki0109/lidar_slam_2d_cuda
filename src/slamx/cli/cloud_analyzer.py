@@ -151,6 +151,162 @@ def _max_window_growth(
     }
 
 
+def _event_counts_in_range(
+    loop_events: dict[int, dict[str, Any]],
+    start_node: int,
+    end_node: int,
+) -> dict[str, int]:
+    selected = [
+        ev for node, ev in loop_events.items() if start_node <= int(node) <= end_node
+    ]
+    return {
+        "candidate_count": sum(int(ev.get("candidate_count", 0)) for ev in selected),
+        "accepted": sum(int(ev.get("accepted", 0)) for ev in selected),
+        "rejected": sum(int(ev.get("rejected", 0)) for ev in selected),
+    }
+
+
+def _metrics_in_range(
+    metrics: dict[int, dict[str, Any]],
+    start_node: int,
+    end_node: int,
+    key: str,
+) -> dict[str, Any]:
+    vals = [
+        float(row[key])
+        for node, row in metrics.items()
+        if start_node <= int(node) <= end_node and row.get(key) is not None
+    ]
+    return series_summary(vals)
+
+
+def _monotonic_growth_fraction(xs: list[float]) -> float:
+    if len(xs) < 2:
+        return 1.0
+    monotonic = sum(1 for a, b in zip(xs, xs[1:]) if float(b) >= float(a))
+    return monotonic / float(len(xs) - 1)
+
+
+def _hotspot_failure_mode(
+    row: dict[str, Any],
+    thresholds: CloudAnalyzerThresholds,
+) -> str:
+    pose_jump = row["pose_jump"]
+    score = row["scan_match_score"]
+    max_jump = float(pose_jump.get("max", 0.0)) if pose_jump.get("n", 0) else 0.0
+    min_score = float(score.get("min", 0.0)) if score.get("n", 0) else 0.0
+    if max_jump > thresholds.pose_jump_fail:
+        return "large_local_jump"
+    if min_score <= thresholds.low_score:
+        return "low_score_scan_match"
+    if max_jump <= thresholds.pose_jump_warn:
+        return "drift_growth_without_local_jump"
+    return "mixed_local_odometry_signal"
+
+
+def _make_hotspot_row(
+    components: dict[str, list[float] | list[int]],
+    metrics: dict[int, dict[str, Any]],
+    loop_events: dict[int, dict[str, Any]],
+    start_i: int,
+    end_i: int,
+    *,
+    window_nodes: int,
+    thresholds: CloudAnalyzerThresholds,
+) -> dict[str, Any]:
+    nodes = components["nodes"]
+    trans = components["translation_m"]
+    longitudinal = components["longitudinal_m"]
+    lateral = components["lateral_m"]
+    yaw = components["yaw_rad"]
+    start_node = int(nodes[start_i])
+    end_node = int(nodes[end_i])
+    start_trans = float(trans[start_i])
+    end_trans = float(trans[end_i])
+    d_long = float(longitudinal[end_i]) - float(longitudinal[start_i])
+    d_lat = float(lateral[end_i]) - float(lateral[start_i])
+    d_yaw = _wrap_pi(float(yaw[end_i]) - float(yaw[start_i]))
+    dominant = "longitudinal" if abs(d_long) >= abs(d_lat) else "lateral"
+    correction = [float(v) for v in trans[start_i : end_i + 1]]
+    row = {
+        "window_nodes": int(window_nodes),
+        "start_node": start_node,
+        "end_node": end_node,
+        "start_correction_m": start_trans,
+        "end_correction_m": end_trans,
+        "growth_m": float(end_trans - start_trans),
+        "delta": {
+            "longitudinal_m": d_long,
+            "lateral_m": d_lat,
+            "yaw_rad": d_yaw,
+            "yaw_deg": math.degrees(d_yaw),
+            "dominant_translation_component": dominant,
+        },
+        "correction_m": series_summary(correction),
+        "monotonic_growth_fraction": _monotonic_growth_fraction(correction),
+        "loop_events": _event_counts_in_range(loop_events, start_node, end_node),
+        "pose_jump": _metrics_in_range(metrics, start_node, end_node, "pose_jump"),
+        "scan_match_score": _metrics_in_range(
+            metrics, start_node, end_node, "scan_match_score"
+        ),
+        "prediction_error_m": _metrics_in_range(
+            metrics, start_node, end_node, "prediction_error_m"
+        ),
+        "odometry_step_m": _metrics_in_range(
+            metrics, start_node, end_node, "odometry_step_m"
+        ),
+    }
+    row["failure_mode"] = _hotspot_failure_mode(row, thresholds)
+    return row
+
+
+def _detect_drift_hotspots(
+    components: dict[str, list[float] | list[int]],
+    metrics: dict[int, dict[str, Any]],
+    loop_events: dict[int, dict[str, Any]],
+    *,
+    thresholds: CloudAnalyzerThresholds,
+    window_nodes: int = 100,
+    limit: int = 5,
+    min_growth_m: float = 0.25,
+) -> list[dict[str, Any]]:
+    nodes = components["nodes"]
+    trans = components["translation_m"]
+    n = len(nodes)
+    if n < 2 or limit <= 0:
+        return []
+
+    step = max(1, min(int(window_nodes), n - 1))
+    candidates: list[tuple[float, int, int]] = []
+    for end_i in range(step, n):
+        start_i = end_i - step
+        growth = float(trans[end_i]) - float(trans[start_i])
+        if growth >= min_growth_m:
+            candidates.append((growth, start_i, end_i))
+    candidates.sort(reverse=True)
+
+    selected: list[tuple[int, int]] = []
+    out: list[dict[str, Any]] = []
+    for _, start_i, end_i in candidates:
+        if any(not (end_i < s or start_i > e) for s, e in selected):
+            continue
+        selected.append((start_i, end_i))
+        row = _make_hotspot_row(
+            components,
+            metrics,
+            loop_events,
+            start_i,
+            end_i,
+            window_nodes=step,
+            thresholds=thresholds,
+        )
+        row["rank"] = len(out) + 1
+        out.append(row)
+        if len(out) >= limit:
+            break
+    return out
+
+
 def _drift_decomposition_summary(
     components: dict[str, list[float] | list[int]],
 ) -> dict[str, Any]:
@@ -381,10 +537,14 @@ class CloudAnalyzer:
         *,
         baseline_run: Path | None = None,
         thresholds: CloudAnalyzerThresholds | None = None,
+        hotspot_window_nodes: int = 100,
+        hotspot_limit: int = 5,
     ) -> None:
         self.run_dir = run_dir
         self.baseline_run = baseline_run
         self.thresholds = thresholds or CloudAnalyzerThresholds()
+        self.hotspot_window_nodes = int(hotspot_window_nodes)
+        self.hotspot_limit = int(hotspot_limit)
 
     def analyze(self) -> dict[str, Any]:
         traj_path = _run_file(self.run_dir, "trajectory.json")
@@ -423,6 +583,7 @@ class CloudAnalyzer:
         }
 
         baseline_traj: list[dict[str, float]] | None = None
+        baseline_evs: list[dict[str, Any]] | None = None
         odom_telemetry = telemetry
         odom_telemetry_source = "run"
         if self.baseline_run is not None:
@@ -441,10 +602,26 @@ class CloudAnalyzer:
                 )
             baseline_telem_path = _run_file(self.baseline_run, "telemetry.jsonl")
             if baseline_telem_path.exists():
-                baseline_telemetry = self._telemetry_facts(load_jsonl(baseline_telem_path))
+                baseline_evs = load_jsonl(baseline_telem_path)
+                baseline_telemetry = self._telemetry_facts(baseline_evs)
                 out["facts"]["baseline_telemetry"] = baseline_telemetry
                 odom_telemetry = baseline_telemetry
                 odom_telemetry_source = "baseline_run"
+            if baseline_traj is not None:
+                n = min(len(baseline_traj), len(traj))
+                components = _trajectory_drift_components(baseline_traj, traj, n)
+                metric_evs = baseline_evs if baseline_evs is not None else evs
+                out["facts"]["baseline_vs_loop"]["hotspots"] = _detect_drift_hotspots(
+                    components,
+                    _keyframe_metrics_by_node(metric_evs),
+                    _loop_events_by_node(evs),
+                    thresholds=self.thresholds,
+                    window_nodes=self.hotspot_window_nodes,
+                    limit=self.hotspot_limit,
+                )
+                out["facts"]["baseline_vs_loop"]["hotspot_telemetry_source"] = (
+                    odom_telemetry_source
+                )
 
         loop_inf = self._infer_loop_closure(telemetry, trajectory)
         odom_inf = self._infer_odometry(
@@ -1348,6 +1525,38 @@ def render_markdown(rep: dict[str, Any]) -> str:
                 f"{float(growth_100.get('growth_m', 0.0)):.3f} m "
                 f"(nodes {growth_100.get('start_node')}->{growth_100.get('end_node')})"
             )
+        hotspots = cmp.get("hotspots") or []
+        if hotspots:
+            lines.extend(
+                [
+                    "",
+                    "## Drift Hotspots",
+                    "",
+                    (
+                        "| rank | nodes | growth_m | long_m | lat_m | yaw_deg | "
+                        "loop | mode |"
+                    ),
+                    "|---:|---|---:|---:|---:|---:|---|---|",
+                ]
+            )
+            for h in hotspots:
+                h_delta = h.get("delta") or {}
+                h_loop = h.get("loop_events") or {}
+                loop_label = (
+                    f"cand:{h_loop.get('candidate_count', 0)} "
+                    f"acc:{h_loop.get('accepted', 0)} "
+                    f"rej:{h_loop.get('rejected', 0)}"
+                )
+                lines.append(
+                    "| "
+                    f"{h.get('rank')} | "
+                    f"{h.get('start_node')}->{h.get('end_node')} | "
+                    f"{float(h.get('growth_m', 0.0)):.3f} | "
+                    f"{float(h_delta.get('longitudinal_m', 0.0)):.3f} | "
+                    f"{float(h_delta.get('lateral_m', 0.0)):.3f} | "
+                    f"{float(h_delta.get('yaw_deg', 0.0)):.2f} | "
+                    f"{loop_label} | {h.get('failure_mode', 'unknown')} |"
+                )
     lines.append("")
     lines.append("## Findings")
     for f in rep.get("findings", []):
