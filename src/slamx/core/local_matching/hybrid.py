@@ -31,6 +31,8 @@ class HybridRefinementConfig:
     top_k: int = 1
     min_linear_dist_m: float = 0.0
     min_angular_dist_deg: float = 0.0
+    selection_translation_weight: float = 0.0
+    selection_rotation_weight: float = 0.0
 
 
 def _candidate_pose(candidate: tuple[float, float, float, float]) -> Pose2:
@@ -39,6 +41,23 @@ def _candidate_pose(candidate: tuple[float, float, float, float]) -> Pose2:
 
 def _angular_distance(a: float, b: float) -> float:
     return abs(math.atan2(math.sin(a - b), math.cos(a - b)))
+
+
+def _refinement_selection_score(
+    cfg: HybridRefinementConfig,
+    *,
+    match_score: float,
+    pose: Pose2,
+    prediction: Pose2,
+) -> tuple[float, float, float]:
+    trans_delta = math.hypot(pose.x - prediction.x, pose.y - prediction.y)
+    yaw_delta = _angular_distance(pose.theta, prediction.theta)
+    score = (
+        float(match_score)
+        - float(cfg.selection_translation_weight) * trans_delta
+        - float(cfg.selection_rotation_weight) * yaw_delta
+    )
+    return score, trans_delta, yaw_delta
 
 
 class HybridScanMatcher:
@@ -91,11 +110,13 @@ class HybridScanMatcher:
         self,
         *,
         scan: LaserScan,
+        prediction_map: Pose2,
         ref_points_xy_map: np.ndarray,
         predictions: list[Pose2],
     ) -> tuple[MatchResult, list[dict[str, object]], int]:
         best_idx = 0
         best_mr: MatchResult | None = None
+        best_selection_score = float("-inf")
         diags: list[dict[str, object]] = []
         for idx, pred in enumerate(predictions):
             mr = self._refine.match(
@@ -104,16 +125,26 @@ class HybridScanMatcher:
                 ref_points_xy_map=ref_points_xy_map,
             )
             icp_diag = mr.diagnostics.get("icp", {}) if isinstance(mr.diagnostics, dict) else {}
+            selection_score, pred_delta_m, pred_delta_yaw = _refinement_selection_score(
+                self._refinement_cfg,
+                match_score=float(mr.score),
+                pose=mr.pose_map,
+                prediction=prediction_map,
+            )
             diags.append(
                 {
                     "prediction": {"x": pred.x, "y": pred.y, "theta": pred.theta},
                     "score": float(mr.score),
+                    "selection_score": float(selection_score),
+                    "prediction_delta_m": float(pred_delta_m),
+                    "prediction_delta_yaw_rad": float(pred_delta_yaw),
                     "final_rms": icp_diag.get("final_rms"),
                 }
             )
-            if best_mr is None or mr.score > best_mr.score:
+            if best_mr is None or selection_score > best_selection_score:
                 best_idx = idx
                 best_mr = mr
+                best_selection_score = selection_score
         assert best_mr is not None
         return best_mr, diags, best_idx
 
@@ -133,6 +164,7 @@ class HybridScanMatcher:
         predictions = self._select_refinement_predictions(coarse)
         refined, refined_diags, best_idx = self._refine_candidates(
             scan=scan,
+            prediction_map=prediction_map,
             ref_points_xy_map=ref_points_xy_map,
             predictions=predictions,
         )

@@ -958,9 +958,70 @@ class CloudAnalyzer:
 
         margins = _score_margins(evs)
         ambiguous_nodes = []
+        scan_match_events = [e for e in evs if e.get("type") == "scan_match_candidates"]
+        best_candidate_indices: list[float] = []
+        coarse_candidate_counts: list[float] = []
+        refined_candidate_counts: list[float] = []
+        selected_pred_delta_m: list[float] = []
+        selected_pred_delta_yaw: list[float] = []
+        selection_changed_nodes: list[int] = []
         for e in evs:
             if e.get("type") != "scan_match_candidates":
                 continue
+            node = int(e.get("node", -1))
+            diag = e.get("diagnostics") or {}
+            if isinstance(diag, dict):
+                hybrid = diag.get("hybrid_bb") or diag.get("hybrid") or {}
+                best_idx: int | None = None
+                if isinstance(hybrid, dict) and "best_candidate_index" in hybrid:
+                    try:
+                        best_idx = int(hybrid["best_candidate_index"])
+                        best_candidate_indices.append(float(best_idx))
+                    except Exception:
+                        best_idx = None
+                coarse = diag.get("coarse") or {}
+                branch_bound = coarse.get("branch_bound") if isinstance(coarse, dict) else {}
+                if isinstance(branch_bound, dict) and "n_candidates" in branch_bound:
+                    try:
+                        coarse_candidate_counts.append(float(branch_bound["n_candidates"]))
+                    except Exception:
+                        pass
+                refined = diag.get("refined_candidates") or []
+                if isinstance(refined, list) and refined:
+                    refined_candidate_counts.append(float(len(refined)))
+                    if best_idx is not None and 0 <= best_idx < len(refined):
+                        selected = refined[best_idx]
+                        if isinstance(selected, dict):
+                            try:
+                                selected_pred_delta_m.append(
+                                    float(selected["prediction_delta_m"])
+                                )
+                            except Exception:
+                                pass
+                            try:
+                                selected_pred_delta_yaw.append(
+                                    float(selected["prediction_delta_yaw_rad"])
+                                )
+                            except Exception:
+                                pass
+                    try:
+                        raw_idx = max(
+                            range(len(refined)),
+                            key=lambda i: float(refined[i].get("score", float("-inf"))),
+                        )
+                        sel_idx = max(
+                            range(len(refined)),
+                            key=lambda i: float(
+                                refined[i].get(
+                                    "selection_score",
+                                    refined[i].get("score", float("-inf")),
+                                )
+                            ),
+                        )
+                        if raw_idx != sel_idx:
+                            selection_changed_nodes.append(node)
+                    except Exception:
+                        pass
             top = e.get("top") or []
             if isinstance(top, list) and len(top) >= 2:
                 try:
@@ -1014,6 +1075,17 @@ class CloudAnalyzer:
             "ambiguous_scan_match_nodes": _node_sample(ambiguous_nodes),
             "worst_pose_jump_nodes": _top_metric_nodes(keyframe_nodes, pose_jumps),
             "scan_match_top2_margin": series_summary(margins),
+            "scan_match_refinement": {
+                "events": len(scan_match_events),
+                "best_candidate_index": series_summary(best_candidate_indices),
+                "nonzero_best_candidate_count": sum(1 for v in best_candidate_indices if v != 0.0),
+                "coarse_candidate_count": series_summary(coarse_candidate_counts),
+                "refined_candidate_count": series_summary(refined_candidate_counts),
+                "selection_changed_count": len(selection_changed_nodes),
+                "selection_changed_nodes": _node_sample(selection_changed_nodes),
+                "selected_prediction_delta_m": series_summary(selected_pred_delta_m),
+                "selected_prediction_delta_yaw_rad": series_summary(selected_pred_delta_yaw),
+            },
             "loop_candidates": {
                 "events": len(candidate_events),
                 "total_candidates": total_candidates,
@@ -1717,6 +1789,7 @@ def render_markdown(rep: dict[str, Any]) -> str:
     telemetry = facts.get("telemetry", {})
     traj = facts.get("trajectory", {})
     loop = telemetry.get("loop_candidates", {})
+    refinement = telemetry.get("scan_match_refinement", {})
     odom = rep.get("inference", {}).get("lidar_odometry", {})
     loop_inf = rep.get("inference", {}).get("loop_closure", {})
     lines = [
@@ -1730,6 +1803,13 @@ def render_markdown(rep: dict[str, Any]) -> str:
         f"- Start/end gap: {float(traj.get('start_end_gap_m', 0.0)):.3f} m",
         f"- Loop accepted/rejected: {loop.get('accepted', 0)}/{loop.get('rejected', 0)}",
     ]
+    if refinement.get("events"):
+        lines.append(
+            "- Scan-match refinement: "
+            f"nonzero best {int(refinement.get('nonzero_best_candidate_count', 0))}/"
+            f"{int(refinement.get('events', 0))}, "
+            f"selection changed {int(refinement.get('selection_changed_count', 0))}"
+        )
     if "baseline_vs_loop" in facts:
         cmp = facts["baseline_vs_loop"]
         growth = cmp.get("drift_growth") or {}
