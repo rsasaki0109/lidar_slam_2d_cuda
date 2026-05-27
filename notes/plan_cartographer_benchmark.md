@@ -1,7 +1,7 @@
 # Cartographer ベンチ / slamx parity ライン 引き継ぎメモ
 
-更新日: 2026-04-14  
-対象ワークスペース: `/media/sasaki/aiueo/ai_coding_ws/lidar_slam_2d`
+更新日: 2026-05-27
+対象ワークスペース: `/media/sasaki/aiueo/ai_coding_ws/old_~2026/lidar_slam_2d`
 
 ## 0. 先に結論
 
@@ -1607,7 +1607,7 @@ config: `configs/iilabs_vscan_bb_loop_fast.yaml`
   - ATE: `align 0.1719 m`
   - no-loop baseline sampled to the same timestamps: `0.2064 m`
   - Cartographer sampled to the same timestamps: `0.2364 m`
-- `loop_fast` rerun snapshot (`2026-04-15`, 実行継続中):
+- `loop_fast` rerun snapshot (`2026-04-15`, 実行継続中として観測):
   - live run dir: `runs/iilabs_loop_full_vscan_bb_loop_fast_rerun`
   - evaluated snapshot source: `runs/iilabs_loop_full_vscan_bb_loop_fast_rerun/telemetry.jsonl`
   - evaluated snapshot keyframes: `4766`
@@ -1616,14 +1616,68 @@ config: `configs/iilabs_vscan_bb_loop_fast.yaml`
   - no-loop baseline sampled to the same timestamps: `0.2428 m`
   - Cartographer sampled to the same timestamps: `0.2294 m`
   - live status at `2026-04-15 12:09 JST`: `5261` keyframes, loop accepted / rejected `478 / 308`
+- `loop_fast` rerun stopped-state re-eval (`2026-05-26`):
+  - no `slamx` process was running; `telemetry.jsonl` mtime was `2026-04-15 12:10:52`
+  - exported keyframes: `runs/iilabs_loop_full_vscan_bb_loop_fast_rerun_keyframes.csv`
+  - keyframes: `5300`
+  - loop accepted / rejected: `484 / 310`
+  - GT coverage: `3266` matched pairs, `5/6` GT segments
+  - ATE: `align 0.2123128289 m`, `no-align 0.4106387280 m`
+  - no-loop baseline sampled to the same timestamps: `align 0.2996062558 m`, `no-align 0.4555111686 m`
+  - Cartographer sampled to the same timestamps: `align 0.2267446279 m`, `no-align 0.5218020135 m`
+  - sampled files:
+    - `runs/iilabs_loop_full_vscan_bb_at_loop_fast_rerun_keyframes.csv`
+    - `runs/iilabs_loop_carto_at_loop_fast_rerun_keyframes.csv`
+- `loop_full_fast_skip3999` full rerun (`2026-05-26`):
+  - first attempt with `configs/iilabs_vscan_bb_loop_fast.yaml` (`runs/iilabs_loop_full_vscan_bb_loop_fast_20260526`) was stopped around `3400` keyframes because `optimize_min_interval_for_long_runs: 100` still entered expensive long-run solves too often
+  - second attempt with `configs/iilabs_vscan_bb_loop_full_fast.yaml` raised the long-run optimization interval to `500`, passed the `3499`-node solve, but was stopped at the `3999`-node solve after it dominated wall time; partial telemetry had `4000` keyframes, `26` optimization events, and no `trajectory.json`
+  - final completed run: `runs/iilabs_loop_full_vscan_bb_loop_full_fast_skip3999_20260526`
+  - config: `configs/iilabs_vscan_bb_loop_full_fast_skip3999.yaml`
+  - keyframes / trajectory poses: `6204 / 6204`
+  - loop accepted / rejected: `626 / 349`
+  - optimization events: `26`; global optimization is intentionally skipped from node `3999`
+  - GT coverage: `3663` matched pairs, `6/6` GT segments
+  - ATE: `align 0.2512102324 m`, `no-align 0.4312555126 m`
+  - no-loop baseline sampled to the same timestamps: `align 0.3910256288 m`, `no-align 0.6326219588 m`
+  - Cartographer sampled to the same timestamps: `align 0.2392012345 m`, `no-align 0.5075625573 m`
+  - sampled files:
+    - `runs/iilabs_loop_full_vscan_bb_at_loop_full_fast_skip3999_20260526.csv`
+    - `runs/iilabs_loop_carto_at_loop_full_fast_skip3999_20260526.csv`
+- `skip3999` telemetry post-processed with one low-budget full-graph solve (`2026-05-26`):
+  - source telemetry: `runs/iilabs_loop_full_vscan_bb_loop_full_fast_skip3999_20260526/telemetry.jsonl`
+  - output: `runs/iilabs_loop_full_vscan_bb_loop_full_fast_skip3999_offline_pg_cap32_20260526`
+  - method: reconstruct odometry edges from keyframe deltas, replay all accepted loop edges, then run pose graph optimize with `max_iterations: 1`, `max_nfev_cap: 32`
+  - solve time: `80.2269 s`; optimizer stopped at max function evaluations, but residual RMS improved `0.0426464353 -> 0.0032949847`
+  - GT coverage: `3663` matched pairs, `6/6` GT segments
+  - ATE: `align 0.1186902237 m`, `no-align 0.3174538241 m`
+  - This is not a fresh full replay, but it uses the completed deterministic `skip3999` telemetry and the same graph constraints. For a fresh replay path, use `configs/iilabs_vscan_bb_loop_full_fast_skip3999_final_cap32.yaml`.
+- `loop_full_fast_skip3999_final_cap32` fresh full replay (`2026-05-26`):
+  - completed run: `runs/iilabs_loop_full_vscan_bb_loop_full_fast_skip3999_final_cap32_20260526`
+  - config: `configs/iilabs_vscan_bb_loop_full_fast_skip3999_final_cap32.yaml`
+  - keyframes / trajectory poses: `6204 / 6204`
+  - loop accepted / rejected: `626 / 349`
+  - optimization events: `27`; periodic global optimizations from node `3999` were skipped, then one final full-graph solve ran at node `6203`
+  - final solve telemetry: `n_poses 6204`, `n_edges 6829`, `nfev 32`, `max_nfev 32`, optimizer stopped at max function evaluations, residual RMS improved `0.0410936603 -> 0.0032302832`
+  - GT coverage: `3663` matched pairs, `6/6` GT segments
+  - ATE: `align 0.1275910238 m`, `no-align 0.3189626389 m`
+  - no-loop baseline sampled to the same timestamps: `align 0.3910256288 m`, `no-align 0.6326219588 m`
+  - Cartographer sampled to the same timestamps: `align 0.2392012345 m`, `no-align 0.5075625573 m`
+  - sampled files:
+    - `runs/iilabs_loop_full_vscan_bb_at_loop_full_fast_skip3999_final_cap32_20260526.csv`
+    - `runs/iilabs_loop_carto_at_loop_full_fast_skip3999_final_cap32_20260526.csv`
 
 読み方:
 
 - `loop_fast` は **full 完走前の 5 セグメント時点で、no-loop baseline (`0.2949`) と Cartographer sampled (`0.2291`) の両方を上回った**
 - `loop_fast` rerun でも、**完走前の別 snapshot (`0.1900`) で no-loop baseline (`0.2428`) と Cartographer sampled (`0.2294`) の両方を再度上回った**
+- 2026-05-26 に停止済み telemetry を再評価した `5300` keyframe snapshot でも、**no-loop baseline と Cartographer sampled の両方を align / no-align で上回った**
+- ただし `0.1900 -> 0.2123` と後段でやや悪化しており、また `trajectory.json` は無い。これは full 完走結果ではなく **stopped-state snapshot** として扱うこと
+- `skip3999` full run では **no-loop baseline を align / no-align とも大きく改善**したが、full `6/6` GT segment の align では Cartographer sampled (`0.2392`) にわずかに届かなかった。一方で no-align は Cartographer sampled (`0.5076`) より良い
+- `skip3999` telemetry に最後だけ低budget full-graph solve を当てると、**align / no-align とも Cartographer sampled を大きく上回った** (`0.1187 / 0.3175` vs `0.2392 / 0.5076`)
+- fresh replay の `skip3999 + final_cap32` でも、**align / no-align とも Cartographer sampled を上回った** (`0.1276 / 0.3190` vs `0.2392 / 0.5076`)。offline postprocess より align は `0.0089 m` 悪いが、通常CLI経路で loop full の新 best として扱える
+- したがって `skip3999` は「完走して比較可能にする tractability baseline」、`skip3999_final_cap32` は「loop full の現時点本命」として使う
 - `loop_tight` も改善しているが、accepted/rejected が多く、到達範囲も `loop_fast` より短い
-- したがって、**full rerun の第一候補は `loop_fast`**。`tight` は「さらに攻める」第二候補に下げてよい
-- ただし `2026-04-15 12:09 JST` 時点でも rerun は未完走なので、最終判断は full ATE を待つ
+- したがって、loop dataset の次手は `loop_fast` 系を継続しつつ、`tight` は「さらに攻める」第二候補に下げてよい
 
 `nav_a_diff` full:
 
@@ -1635,12 +1689,85 @@ config: `configs/iilabs_vscan_bb_loop_fast.yaml`
   - ATE: `align 0.0947 m`
   - no-loop baseline sampled to the same timestamps: `0.0960 m`
   - Cartographer sampled to the same timestamps: `0.3218 m`
+- dense loop rerun attempt (`2026-05-27`):
+  - first full attempt reused `configs/iilabs_vscan_bb_loop_full_fast_skip3999_final_cap32.yaml` on `nav_a_diff`
+  - stopped around `1421` keyframes after `21` optimization events and `67` accepted loops; projected wall time was too high for a full run
+  - a later sparse-budget attempt with skip at `3999` reached the `3499`-node solve and still spent minutes there, so the skip threshold was moved earlier
+- sparse final-cap32 config:
+  - config: `configs/iilabs_vscan_bb_loop_sparse_final_cap32.yaml`
+  - main differences from loop full config: `loop_detection.detect_every_n: 25`, `optimize_every_n_keyframes: 50`, periodic `pose_graph.max_nfev_cap: 128`, skip periodic global solves from node `3499`, then run one final solve with `max_nfev_cap: 32`
+- 2k sparse smoke (`2026-05-27`):
+  - early uncapped-periodic variant: `runs/iilabs_nav_a_diff_s2k_vscan_bb_loop_sparse_final_cap32_20260527`
+    - elapsed `620.30 s`
+    - loop accepted / rejected: `34 / 1`
+    - ATE: `align 0.0871064667 m`, `no-align 0.1723466317 m`
+  - budgeted variant: `runs/iilabs_nav_a_diff_s2k_vscan_bb_loop_sparse_budget_final_cap32_20260527`
+    - elapsed `613.95 s`
+    - loop accepted: `34`
+    - final solve: `nfev 32`, `max_nfev 32`, residual RMS `0.0008555966 -> 0.0008555898`
+    - ATE: `align 0.0879867314 m`, `no-align 0.1835147403 m`
+  - no-loop 2k baseline (`runs/iilabs_nav_a_diff_s2k_vscan_bb`): `align 0.1186623130 m`, `no-align 0.2400159458 m`
+- sparse full replay (`2026-05-27`):
+  - completed run: `runs/iilabs_nav_a_diff_full_vscan_bb_loop_sparse_budget_skip3499_final_cap32_20260527`
+  - elapsed `3250.17 s`
+  - keyframes / trajectory poses: `7486 / 7486`
+  - loop accepted / rejected: `224 / 31`
+  - optimization events: `16`; periodic solves from node `3499` were skipped, then one final full-graph solve ran at node `7485`
+  - final solve telemetry: `n_poses 7486`, `n_edges 7709`, `nfev 32`, `max_nfev 32`, optimizer stopped at max function evaluations, residual RMS improved `0.0187955202 -> 0.0012301896`
+  - GT coverage: `7480` matched pairs, continuous GT segment
+  - ATE: `align 0.1263464358 m`, `no-align 0.2718917979 m`
+  - no-loop baseline sampled to the same timestamps: `align 0.2395484536 m`, `no-align 0.5513881588 m`
+  - Cartographer sampled to the same timestamps: `align 0.4157850384 m`, `no-align 0.5334481019 m`
+  - sampled files:
+    - `runs/iilabs_nav_a_diff_full_vscan_bb_at_loop_sparse_budget_skip3499_final_cap32_20260527.csv`
+    - `runs/iilabs_nav_a_diff_carto_at_loop_sparse_budget_skip3499_final_cap32_20260527.csv`
 
 読み方:
 
-- `nav_a_diff` は **最初の約123秒では loop closure の上乗せ効果がほぼない**
-- しかも accepted edge 数は多いので、現状では `loop` ほどの費用対効果が見えない
-- したがって **次の full rerun は `loop` を先、`nav_a_diff` は後** でよい
+- `nav_a_diff` は **最初の約123秒では loop closure の上乗せ効果がほぼない**ように見えたが、2k smoke では sparse loop + final cap32 が no-loop 2k baseline を明確に改善した
+- full replay でも sparse loop + final cap32 は **no-loop baseline を align / no-align とも改善**した (`0.1263 / 0.2719` vs `0.2395 / 0.5514`)
+- 同 timestamps の Cartographer sampled よりも align / no-align とも良い (`0.1263 / 0.2719` vs `0.4158 / 0.5334`)
+- dense every-5 loop は `nav_a_diff` では重すぎる。`nav_a_diff` full の本命は `iilabs_vscan_bb_loop_sparse_final_cap32.yaml` として扱う
+
+`elevator` full:
+
+- baseline (`runs/iilabs_elevator_full_vscan_bb`): full 完走、trajectory `5022` poses、GT coverage `415` matched pairs / `2/2` GT segments、ATE `align 0.5993870871 m`, `no-align 0.8149828087 m`
+- first sparse attempt (`2026-05-27`):
+  - config: `configs/iilabs_vscan_bb_loop_sparse_final_cap32.yaml`
+  - stopped around `1209` keyframes because accepted loop was still `0`; `icp_accept_rms: 0.05` was too strict for elevator
+- strict elevator smoke attempt:
+  - early elevator-specific config used `accept_score: -0.30`
+  - stopped around `926` keyframes because candidates were rejected before ICP refinement; `accept_score` was too strict
+- elevator sparse final-cap32 config:
+  - config: `configs/iilabs_vscan_bb_loop_elevator_sparse_final_cap32.yaml`
+  - main differences from nav sparse config: `search_radius_m: 2.0`, `max_candidates: 2`, `accept_score: -2.0`, `icp_accept_rms: 0.10`
+- 2k smoke (`2026-05-27`):
+  - completed run: `runs/iilabs_elevator_s2k_vscan_bb_loop_elevator_sparse_accept2_final_cap32_20260527`
+  - elapsed `671.31 s`
+  - keyframes / trajectory poses: `2000 / 2000`
+  - loop accepted / rejected: `39 / 23`
+  - optimization events: `14`
+  - final solve: `nfev 32`, residual RMS `0.0021962959 -> 0.0021962221`
+  - ATE: `align 0.0150576934 m`, `no-align 0.0288741384 m`
+  - no-loop 2k baseline (`runs/iilabs_elevator_s2k_vscan_bb`): `align 0.0148326797 m`, `no-align 0.0161436103 m`
+  - interpretation: 2k smoke only covers the first GT segment, so it does not measure the long-gap drift that hurts full
+- elevator sparse full replay (`2026-05-27`):
+  - completed run: `runs/iilabs_elevator_full_vscan_bb_loop_elevator_sparse_accept2_final_cap32_20260527`
+  - elapsed `3027.54 s`
+  - keyframes / trajectory poses: `5022 / 5022`
+  - loop accepted / rejected: `195 / 95`
+  - optimization events: `16`; periodic solves from node `3499` were skipped, then one final full-graph solve ran at node `5021`
+  - final solve telemetry: `n_poses 5022`, `n_edges 5216`, `nfev 32`, `max_nfev 32`, optimizer stopped at max function evaluations, residual RMS improved `0.0298496880 -> 0.0018162410`
+  - GT coverage: `415` matched pairs, `2/2` GT segments
+  - ATE: `align 0.0298528189 m`, `no-align 0.0796998974 m`
+  - no-loop baseline sampled to the same timestamps: `align 0.5993870871 m`, `no-align 0.8149828087 m`
+  - sampled file: `runs/iilabs_elevator_full_vscan_bb_at_loop_elevator_sparse_accept2_final_cap32_20260527.csv`
+
+読み方:
+
+- `elevator` は GT が先頭約23.5秒と終盤約18.2秒の2セグメントだけなので、2k smoke は full の本質を測れない
+- full replay では sparse loop + final cap32 が **no-loop baseline を align / no-align とも大きく改善**した (`0.0299 / 0.0797` vs `0.5994 / 0.8150`)
+- `elevator` full の本命は `iilabs_vscan_bb_loop_elevator_sparse_final_cap32.yaml` として扱う
 
 ## 17. コードベース全体像 (2026-04-14 時点)
 
@@ -1704,7 +1831,7 @@ src/slamx/
 
 ### 17.4 テストスイート
 
-86 テスト、全パス。主要テストファイル:
+2026-05-26 時点で `env -u PYTHONPATH .venv/bin/python -m pytest tests -q` は `143 passed in 49.20s`。主要テストファイル:
 
 | ファイル | テスト数 | カバー対象 |
 |---|---|---|
@@ -1726,6 +1853,11 @@ src/slamx/
 |---|---|---|
 | `iilabs_ramp_vscan_bb.yaml` | ★ **統一 best config** (vscan + B&B + ICP) | 全6データセットで Carto 超え |
 | `iilabs_vscan_bb_loop_fast.yaml` | ★ vscan + B&B + loop closure (高速版) | full bag 評価中 |
+| `iilabs_vscan_bb_loop_full_fast.yaml` | loop full bag 用。long-run solve interval を `500` に拡大 | `3999`-node solve が重く、`trajectory.json` なしで停止 |
+| `iilabs_vscan_bb_loop_full_fast_skip3999.yaml` | loop full bag 完走用。`3999` 以降の global solve をスキップ | `6204` poses 完走。no-loop 改善、Carto align には未達 |
+| `iilabs_vscan_bb_loop_full_fast_skip3999_final_cap32.yaml` | `skip3999` 完走後、最後だけ `max_nfev_cap: 32` で full-graph solve | fresh full replay で `6204` poses 完走。Carto を align/no-align とも超えた |
+| `iilabs_vscan_bb_loop_sparse_final_cap32.yaml` | nav_a_diff full bag 用。loop 検出を `25` フレーム間隔、周期 solve cap `128`、`3499` 以降 skip、最後だけ cap32 | `7486` poses 完走。no-loop と Carto sampled を align/no-align とも超えた |
+| `iilabs_vscan_bb_loop_elevator_sparse_final_cap32.yaml` | elevator full bag 用。探索半径を `2.0m`、候補数 `2`、ICP acceptance `0.10` に緩め、最後だけ cap32 | `5022` poses 完走。no-loop を align/no-align とも大幅改善 |
 | `iilabs_ramp_virtual_scan.yaml` | vscan baseline (B&B なし) | 0.3567m |
 | `iilabs_ramp_bb_2d.yaml` | 2D + B&B (vscan なし) | 0.4571m |
 | `iilabs_hybrid_tail_refdense_cv_s2_refinegrid.yaml` | 2D 旧 best | 5/6 勝利 |
@@ -1792,27 +1924,63 @@ for ds in elevator nav_a_diff loop; do
 done
 ```
 
+`loop` dataset は `configs/iilabs_vscan_bb_loop_fast.yaml` のままだと long-run global solve が重く、2026-05-26 の再走では完走しなかった。完走して同一タイムスタンプ比較を取る場合は、`configs/iilabs_vscan_bb_loop_full_fast_skip3999_final_cap32.yaml` を本命、`configs/iilabs_vscan_bb_loop_full_fast_skip3999.yaml` を tractability baseline として使うこと。
+
+`nav_a_diff` dataset では dense every-5 loop が重すぎたため、2026-05-27 時点では `configs/iilabs_vscan_bb_loop_sparse_final_cap32.yaml` を本命として使うこと。
+
+`elevator` dataset では GT が2セグメントのみなので、2k smoke ではなく full replay の結果を見ること。2026-05-27 時点では `configs/iilabs_vscan_bb_loop_elevator_sparse_final_cap32.yaml` が本命。
+
 ## 18. 次担当 (Codex) への引き継ぎ
 
-### 18.1 現在進行中
+### 18.1 現在確認済みの最新状態
 
-- `runs/iilabs_loop_full_vscan_bb_loop_fast` — loop full bag + loop closure 実行中
-  - config: `configs/iilabs_vscan_bb_loop_fast.yaml`
-  - 比較先: loop full (loop closure なし) = 0.3910 m
-  - 2k prefix (loop closure なし) = 0.1013 m
+- `runs/iilabs_loop_full_vscan_bb_loop_full_fast_skip3999_final_cap32_20260526` — `skip3999` 完走後に最後だけ低budget full-graph solve を1回かける fresh full replay
+  - config: `configs/iilabs_vscan_bb_loop_full_fast_skip3999_final_cap32.yaml`
+  - 比較先: loop full (loop closure なし) = `align 0.3910 m`
+  - 2k prefix (loop closure なし) = `align 0.1013 m`
+  - trajectory: `6204` poses / telemetry keyframes: `6204`
+  - loop accepted / rejected: `626 / 349`
+  - optimization events: `27`; `3999` 以降の periodic global solve はスキップし、最後だけ `max_nfev_cap: 32`
+  - final solve: `nfev 32`, residual RMS `0.0410936603 -> 0.0032302832`
+  - ATE: `align 0.1276 m` / `no-align 0.3190 m`, `3663` matched pairs, `6/6` GT segments
+  - 同 timestamps の no-loop baseline: `align 0.3910 m` / `no-align 0.6326 m`
+  - 同 timestamps の Cartographer sampled: `align 0.2392 m` / `no-align 0.5076 m`
+  - reference: offline postprocess run `runs/iilabs_loop_full_vscan_bb_loop_full_fast_skip3999_offline_pg_cap32_20260526` は `align 0.1187 m` / `no-align 0.3175 m`
+- `runs/iilabs_nav_a_diff_full_vscan_bb_loop_sparse_budget_skip3499_final_cap32_20260527` — sparse loop + final cap32 の fresh full replay
+  - config: `configs/iilabs_vscan_bb_loop_sparse_final_cap32.yaml`
+  - 比較先: nav_a_diff full (loop closure なし) = `align 0.2395 m`
+  - 2k prefix (loop closure なし) = `align 0.1187 m`
+  - trajectory: `7486` poses / telemetry keyframes: `7486`
+  - loop accepted / rejected: `224 / 31`
+  - optimization events: `16`; `3499` 以降の periodic global solve はスキップし、最後だけ `max_nfev_cap: 32`
+  - final solve: `nfev 32`, residual RMS `0.0187955202 -> 0.0012301896`
+  - ATE: `align 0.1263 m` / `no-align 0.2719 m`, `7480` matched pairs
+  - 同 timestamps の no-loop baseline: `align 0.2395 m` / `no-align 0.5514 m`
+  - 同 timestamps の Cartographer sampled: `align 0.4158 m` / `no-align 0.5334 m`
+- `runs/iilabs_elevator_full_vscan_bb_loop_elevator_sparse_accept2_final_cap32_20260527` — elevator sparse loop + final cap32 の fresh full replay
+  - config: `configs/iilabs_vscan_bb_loop_elevator_sparse_final_cap32.yaml`
+  - 比較先: elevator full (loop closure なし) = `align 0.5994 m`, `no-align 0.8150 m`
+  - trajectory: `5022` poses / telemetry keyframes: `5022`
+  - loop accepted / rejected: `195 / 95`
+  - optimization events: `16`; `3499` 以降の periodic global solve はスキップし、最後だけ `max_nfev_cap: 32`
+  - final solve: `nfev 32`, residual RMS `0.0298496880 -> 0.0018162410`
+  - ATE: `align 0.0299 m` / `no-align 0.0797 m`, `415` matched pairs, `2/2` GT segments
+  - 同 timestamps の no-loop baseline: `align 0.5994 m` / `no-align 0.8150 m`
 
 ### 18.2 残タスク (優先度順)
 
-1. **loop full bag + loop closure の結果確認**
-   - 完了後に ATE 評価し、ドリフト抑制効果を確認
-   - 改善されたら nav_a_diff / elevator でも同じ config で実行
+1. **loop full bag + loop closure の後段最適化を固定する**
+   - fresh replay で `skip3999 + final cap32` が Cartographer sampled を align / no-align とも上回った
+   - offline postprocess より align が `0.0089 m` 悪い差分は残るので、必要なら final solve の設定差分を調べる
+   - 現状値で十分なら loop full の新 best として固定し、nav_a_diff / elevator へ展開する
 
 2. **nav_a_diff full bag + loop closure**
-   - full (no loop) = 0.2395 m → loop closure で改善を期待
+   - sparse loop + final cap32 の fresh full replay が完了し、no-loop baseline と Cartographer sampled を align / no-align とも上回った
+   - 現状値で十分なら nav_a_diff full の新 best として固定する
 
 3. **elevator full bag + loop closure**
-   - full (no loop) = 0.5994 m
-   - ただし GT は先頭 24.6 秒のみなので、full bag の改善が GT に反映されない可能性あり
+   - sparse loop + final cap32 の fresh full replay が完了し、no-loop baseline を align / no-align とも大きく上回った
+   - ただし GT は2セグメントのみなので、結果解釈では matched coverage を必ず併記する
 
 4. **Cartographer backpack2d ベンチマーク**
    - 元々の比較対象。vscan + B&B を backpack2d でも試す
@@ -1836,7 +2004,7 @@ done
 - `configs/iilabs_vscan_bb_loop_fast.yaml` — loop closure 付き full bag 用 (検証中)
 - `runs/iilabs_*_s2k_vscan_bb/` — 2k prefix 結果 (全6データセット)
 - `runs/iilabs_*_full_vscan_bb/` — full bag 結果 (loop closure なし)
-- 86 テスト全パス (`env -u PYTHONPATH .venv/bin/pytest tests/ -q`)
+- 143 テスト全パス (`env -u PYTHONPATH .venv/bin/python -m pytest tests -q`)
 
 ### 18.4 信用してはいけないもの
 
