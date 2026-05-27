@@ -15,7 +15,9 @@ class LoopClosureResult:
     j: int
     score: float
     accepted: bool
-    rel_ij: Pose2 | None  # pose of j in i frame (i.inverse().compose(j))
+    # Estimated pose of j in i frame (i.inverse().compose(j)). Keep this for
+    # rejected candidates too so loop gates can be analyzed offline.
+    rel_ij: Pose2 | None
     diagnostics: dict
 
 
@@ -81,17 +83,37 @@ class HeuristicLoopDetector:
             final_pose = mr.pose_map
             final_score = float(mr.score)
             diag: dict = {"ref_points": int(ref.shape[0]), "matcher": mr.diagnostics}
+            score_gate_score = final_score
+            score_ok = score_gate_score >= float(self.cfg.accept_score)
+            icp_rms = None
+            rms_ok = None
+            reject_reason = None
 
-            if refiner is not None and final_score >= float(self.cfg.accept_score):
+            if refiner is not None and score_ok:
                 # ICP refinement using correlative result as initial guess
                 icp_mr = refiner.match(scan=scan, prediction_map=mr.pose_map, ref_points_xy_map=ref)
                 icp_rms = icp_mr.diagnostics.get("icp", {}).get("final_rms")
                 diag["icp"] = icp_mr.diagnostics
                 final_pose = icp_mr.pose_map
                 final_score = float(icp_mr.score)
-                accepted = icp_rms is not None and icp_rms <= float(self.cfg.icp_accept_rms)
+                rms_ok = icp_rms is not None and icp_rms <= float(self.cfg.icp_accept_rms)
+                accepted = bool(rms_ok)
+                if not accepted:
+                    reject_reason = "icp_rms"
             else:
-                accepted = refiner is None and bool(final_score >= float(self.cfg.accept_score))
+                accepted = refiner is None and bool(score_ok)
+                if not accepted:
+                    reject_reason = "score"
+
+            diag["acceptance"] = {
+                "score_gate_score": float(score_gate_score),
+                "accept_score": float(self.cfg.accept_score),
+                "score_ok": bool(score_ok),
+                "icp_final_rms": float(icp_rms) if icp_rms is not None else None,
+                "icp_accept_rms": float(self.cfg.icp_accept_rms),
+                "rms_ok": bool(rms_ok) if rms_ok is not None else None,
+                "reject_reason": reject_reason,
+            }
 
             rel = poses[j].inverse().compose(final_pose)
             out.append(
@@ -100,9 +122,8 @@ class HeuristicLoopDetector:
                     j=node_id,
                     score=final_score,
                     accepted=accepted,
-                    rel_ij=rel if accepted else None,
+                    rel_ij=rel,
                     diagnostics=diag,
                 )
             )
         return out
-
