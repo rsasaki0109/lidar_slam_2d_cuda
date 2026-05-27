@@ -13,6 +13,7 @@ from slamx.core.local_matching.branch_bound import (
     HybridBBScanMatcher,
     ProbabilityGrid,
 )
+from slamx.core.local_matching.hybrid import HybridRefinementConfig
 from slamx.core.local_matching.icp import IcpConfig
 from slamx.core.types import LaserScan, Pose2
 
@@ -285,6 +286,44 @@ class TestHybridBBMatcher:
 
         assert result.score > float("-inf")
         assert "hybrid_bb" in result.diagnostics
+
+    def test_hybrid_bb_refines_multiple_yaw_hypotheses(self) -> None:
+        """top_k should make hybrid_bb verify nearby yaw hypotheses with ICP."""
+        ref = _l_shape_points()
+        shift = np.array([0.05, 0.03])
+        scan_pts = ref - shift
+        scan = _make_scan(scan_pts)
+
+        bb_cfg = BranchBoundConfig(
+            resolution_m=0.03,
+            n_levels=3,
+            linear_window_m=0.2,
+            angular_window_deg=10.0,
+            angular_step_deg=1.0,
+            sigma_hit_m=0.08,
+        )
+        icp_cfg = IcpConfig(
+            max_iterations=15,
+            max_correspondence_dist_m=0.5,
+            min_correspondences=10,
+            trim_fraction=0.1,
+        )
+        matcher = HybridBBScanMatcher(
+            branch_bound=bb_cfg,
+            icp=icp_cfg,
+            refinement=HybridRefinementConfig(top_k=3, min_angular_dist_deg=1.0),
+        )
+        result = matcher.match(
+            scan=scan,
+            prediction_map=Pose2(0.0, 0.0, 0.0),
+            ref_points_xy_map=ref,
+        )
+
+        diag = result.diagnostics["hybrid_bb"]
+        assert diag["n_refined_candidates"] == 3
+        assert 0 <= diag["best_candidate_index"] < 3
+        refined = result.diagnostics["refined_candidates"]
+        assert len(refined) == 3
 
     def test_implements_protocol(self) -> None:
         """HybridBBScanMatcher implements the ScanMatcher protocol."""
