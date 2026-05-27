@@ -234,6 +234,149 @@ def test_cloud_analyzer_summarizes_scan_match_refinement(tmp_path: Path) -> None
     assert refinement["selected_prediction_delta_yaw_rad"]["max"] == 0.01
 
 
+def test_cloud_analyzer_emits_scan_match_hotspots(tmp_path: Path) -> None:
+    run = tmp_path / "run"
+    run.mkdir()
+    _write_json(
+        run / "trajectory.json",
+        [
+            {"i": 0, "x": 0.0, "y": 0.0, "theta": 0.0},
+            {"i": 1, "x": 0.1, "y": 0.0, "theta": 0.0},
+            {"i": 2, "x": 0.2, "y": 0.0, "theta": 0.0},
+        ],
+    )
+    _write_jsonl(
+        run / "telemetry.jsonl",
+        [
+            {
+                "type": "keyframe",
+                "schema_version": 1,
+                "node": 0,
+                "stamp_ns": 0,
+                "pose": {"x": 0.0, "y": 0.0, "theta": 0.0},
+                "prediction": {"x": 0.0, "y": 0.0, "theta": 0.0},
+                "scan_match_score": 0.0,
+                "pose_jump": 0.0,
+            },
+            {
+                "type": "keyframe",
+                "schema_version": 1,
+                "node": 1,
+                "stamp_ns": 1,
+                "pose": {"x": 0.1, "y": 0.0, "theta": 0.0},
+                "prediction": {"x": 0.05, "y": 0.0, "theta": 0.0},
+                "scan_match_score": -0.05,
+                "pose_jump": 0.30,
+            },
+            {
+                "type": "scan_match_candidates",
+                "schema_version": 1,
+                "node": 1,
+                "best_score": -0.05,
+                "top": [],
+                "diagnostics": {
+                    "hybrid_bb": {"best_candidate_index": 2},
+                    "coarse": {"branch_bound": {"n_candidates": 7}},
+                    "refined": {"icp": {"final_rms": 0.123}},
+                    "refined_candidates": [
+                        {"score": -0.05, "final_rms": 0.123},
+                        {"score": -0.06, "final_rms": 0.130},
+                        {"score": -0.08, "final_rms": 0.150},
+                    ],
+                },
+            },
+            {
+                "type": "keyframe",
+                "schema_version": 1,
+                "node": 2,
+                "stamp_ns": 2,
+                "pose": {"x": 0.2, "y": 0.0, "theta": 0.0},
+                "prediction": {"x": 0.2, "y": 0.0, "theta": 0.0},
+                "scan_match_score": -0.01,
+                "pose_jump": 0.05,
+            },
+        ],
+    )
+
+    rep = CloudAnalyzer(run, scan_match_hotspots=2).analyze()
+    hotspots = rep["facts"]["telemetry"]["scan_match_hotspots"]
+
+    assert [r["node"] for r in hotspots] == [1, 2]
+    top = hotspots[0]
+    assert top["pose_jump"] == 0.30
+    assert top["best_candidate_index"] == 2
+    assert top["n_refined_candidates"] == 3
+    assert top["n_coarse_candidates"] == 7
+    assert top["refined_score_best"] == -0.05
+    assert abs(top["refined_score_gap"] - 0.01) < 1e-9
+    assert top["icp_final_rms"] == 0.123
+    assert abs(top["prediction_delta_m"] - 0.05) < 1e-9
+    assert hotspots[1]["best_candidate_index"] is None
+
+
+def test_cloud_analyze_cli_renders_scan_match_hotspots(tmp_path: Path) -> None:
+    run = tmp_path / "run"
+    run.mkdir()
+    _write_json(
+        run / "trajectory.json",
+        [
+            {"i": 0, "x": 0.0, "y": 0.0, "theta": 0.0},
+            {"i": 1, "x": 0.1, "y": 0.0, "theta": 0.0},
+        ],
+    )
+    _write_jsonl(
+        run / "telemetry.jsonl",
+        [
+            {
+                "type": "keyframe",
+                "schema_version": 1,
+                "node": 0,
+                "stamp_ns": 0,
+                "pose": {"x": 0.0, "y": 0.0, "theta": 0.0},
+                "prediction": {"x": 0.0, "y": 0.0, "theta": 0.0},
+                "scan_match_score": 0.0,
+                "pose_jump": 0.0,
+            },
+            {
+                "type": "keyframe",
+                "schema_version": 1,
+                "node": 1,
+                "stamp_ns": 1,
+                "pose": {"x": 0.1, "y": 0.0, "theta": 0.0},
+                "prediction": {"x": 0.05, "y": 0.0, "theta": 0.0},
+                "scan_match_score": -0.05,
+                "pose_jump": 0.30,
+            },
+            {
+                "type": "scan_match_candidates",
+                "schema_version": 1,
+                "node": 1,
+                "best_score": -0.05,
+                "top": [],
+                "diagnostics": {
+                    "hybrid_bb": {"best_candidate_index": 0},
+                    "coarse": {"branch_bound": {"n_candidates": 3}},
+                    "refined": {"icp": {"final_rms": 0.12}},
+                    "refined_candidates": [
+                        {"score": -0.05, "final_rms": 0.12},
+                        {"score": -0.07, "final_rms": 0.18},
+                    ],
+                },
+            },
+        ],
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["cloud-analyze", str(run), "--markdown", "--scan-match-hotspots", "5"],
+    )
+
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert "## Scan-Match Hotspots" in result.stdout
+    assert "| 1 | 0.300 |" in result.stdout
+
+
 def test_cloud_analyze_cli_outputs_hotspot_markdown(tmp_path: Path) -> None:
     baseline, looped = _make_run(tmp_path)
 
