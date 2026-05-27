@@ -43,6 +43,10 @@ class LocalSlamConfig:
     submap: SubmapBuilderConfig = field(default_factory=SubmapBuilderConfig)
     optimize_every_n_keyframes: int = 10
     pose_graph: PoseGraphConfig = field(default_factory=PoseGraphConfig)
+    loop_pose_graph: PoseGraphConfig | None = None
+    optimize_on_loop_closure: bool = False
+    loop_optimize_min_interval_keyframes: int = 0
+    loop_edge_weight: float = 1.0
     # When node >= optimize_adaptive_from_node, spacing between graph solves is at least
     # optimize_min_interval_for_long_runs (keeps long offline replays tractable).
     optimize_adaptive_from_node: int | None = None
@@ -95,6 +99,7 @@ class LocalSlamEngine:
     _loop_matcher: ScanMatcher | None = field(default=None, repr=False)
     _loop_refiner: ScanMatcher | None = field(default=None, repr=False)
     _heuristic_loop: HeuristicLoopDetector | None = field(default=None, repr=False)
+    _last_loop_opt_node: int = field(default=-1_000_000_000, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.graph = PoseGraph(cfg=self.cfg.pose_graph)
@@ -251,7 +256,14 @@ class LocalSlamEngine:
         self._emit_match_detail(node, mr, top_candidates=mr.candidates[:10])
 
         loop_interval = max(1, int(self.cfg.loop_detect_every_n))
-        if self._heuristic_loop is not None and self._loop_matcher is not None and node % loop_interval == 0:
+        loop_accepted = False
+        optimized_this_node = False
+        should_detect_loop = (
+            self._heuristic_loop is not None
+            and self._loop_matcher is not None
+            and node % loop_interval == 0
+        )
+        if should_detect_loop:
             lrs = self._heuristic_loop.detect_and_match(
                 matcher=self._loop_matcher,
                 refiner=self._loop_refiner,
@@ -286,7 +298,11 @@ class LocalSlamEngine:
             for r in lrs:
                 if r.accepted and r.rel_ij is not None:
                     # add loop closure edge
-                    self.graph.add_edge(Edge(i=r.i, j=r.j, rel=r.rel_ij))
+                    loop_weight = max(0.0, float(self.cfg.loop_edge_weight))
+                    self.graph.add_edge(
+                        Edge(i=r.i, j=r.j, rel=r.rel_ij, weight=loop_weight)
+                    )
+                    loop_accepted = True
                     if self.telemetry:
                         self.telemetry.emit(
                             "loop_closure_accepted",
@@ -295,7 +311,12 @@ class LocalSlamEngine:
                                 "i": r.i,
                                 "j": r.j,
                                 "score": r.score,
-                                "rel_ij": {"x": r.rel_ij.x, "y": r.rel_ij.y, "theta": r.rel_ij.theta},
+                                "rel_ij": {
+                                    "x": r.rel_ij.x,
+                                    "y": r.rel_ij.y,
+                                    "theta": r.rel_ij.theta,
+                                },
+                                "weight": loop_weight,
                             },
                         )
                 elif self.telemetry:
@@ -303,6 +324,10 @@ class LocalSlamEngine:
                         "loop_closure_rejected",
                         {"node": node, "i": r.i, "j": r.j, "score": r.score},
                     )
+        if loop_accepted and self._should_optimize_on_loop_closure(node):
+            self._optimize_pose_graph(node, reason="loop_closure", cfg=self.cfg.loop_pose_graph)
+            self._last_loop_opt_node = node
+            optimized_this_node = True
 
         opt_every = self.cfg.optimize_every_n_keyframes
         if (
@@ -318,14 +343,37 @@ class LocalSlamEngine:
                 and node >= int(self.cfg.pose_graph_skip_optimization_from_node)
             )
             if not skip_global:
-                opt = self.graph.optimize()
-                if self.telemetry:
-                    self.telemetry.emit("optimization", {"node": node, **opt})
-                self._last_pose = self.graph.poses[-1]
-                if len(self.graph.poses) >= 2:
-                    self._last_rel = self.graph.poses[-2].inverse().compose(self.graph.poses[-1])
+                if not optimized_this_node:
+                    self._optimize_pose_graph(node, reason="periodic")
 
         return accepted
+
+    def _should_optimize_on_loop_closure(self, node: int) -> bool:
+        if not self.cfg.optimize_on_loop_closure:
+            return False
+        min_interval = max(0, int(self.cfg.loop_optimize_min_interval_keyframes))
+        return (int(node) - int(self._last_loop_opt_node)) >= min_interval
+
+    def _optimize_pose_graph(
+        self,
+        node: int,
+        *,
+        reason: str,
+        cfg: PoseGraphConfig | None = None,
+    ) -> dict:
+        old_cfg = self.graph.cfg
+        if cfg is not None:
+            self.graph.cfg = cfg
+        try:
+            opt = self.graph.optimize()
+        finally:
+            self.graph.cfg = old_cfg
+        if self.telemetry:
+            self.telemetry.emit("optimization", {"node": node, "reason": reason, **opt})
+        self._last_pose = self.graph.poses[-1]
+        if len(self.graph.poses) >= 2:
+            self._last_rel = self.graph.poses[-2].inverse().compose(self.graph.poses[-1])
+        return opt
 
     def _try_scan_context_relocalization(
         self,
