@@ -320,10 +320,22 @@ class LocalSlamEngine:
                             },
                         )
                 elif self.telemetry:
-                    self.telemetry.emit(
-                        "loop_closure_rejected",
-                        {"node": node, "i": r.i, "j": r.j, "score": r.score},
-                    )
+                    payload: dict[str, object] = {
+                        "node": node,
+                        "i": r.i,
+                        "j": r.j,
+                        "score": r.score,
+                    }
+                    if r.rel_ij is not None:
+                        payload["rel_ij"] = {
+                            "x": r.rel_ij.x,
+                            "y": r.rel_ij.y,
+                            "theta": r.rel_ij.theta,
+                        }
+                    reason = r.diagnostics.get("acceptance", {}).get("reject_reason")
+                    if reason:
+                        payload["reason"] = reason
+                    self.telemetry.emit("loop_closure_rejected", payload)
         if loop_accepted and self._should_optimize_on_loop_closure(node):
             self._optimize_pose_graph(node, reason="loop_closure", cfg=self.cfg.loop_pose_graph)
             self._last_loop_opt_node = node
