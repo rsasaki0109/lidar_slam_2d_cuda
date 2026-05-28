@@ -16,7 +16,7 @@ import numpy as np
 from scipy.ndimage import gaussian_filter
 
 from slamx.core.local_matching.icp import IcpConfig, IcpScanMatcher
-from slamx.core.local_matching.hybrid import HybridRefinementConfig
+from slamx.core.local_matching.hybrid import HybridRefinementConfig, _refinement_selection_score
 from slamx.core.types import LaserScan, MatchResult, Pose2
 
 
@@ -37,6 +37,9 @@ class BranchBoundConfig:
     angular_step_deg: float = 1.0
     sigma_hit_m: float = 0.10
     min_score: float = -0.5
+    # 0 keeps the historical single best candidate. Set >1 to expose additional
+    # coarse hypotheses for opt-in hybrid refinement experiments.
+    candidate_limit: int = 0
 
 
 class ProbabilityGrid:
@@ -186,6 +189,9 @@ class BranchBoundScanMatcher:
 
         best_score = float("-inf")
         best_pose = prediction_map
+        candidate_limit = max(1, int(self.cfg.candidate_limit))
+        top_candidates: list[tuple[float, float, float, float]] = []
+        candidate_threshold = float("-inf")
 
         # 4. For each angle, branch-and-bound over (x, y)
         for dth in ang:
@@ -197,22 +203,38 @@ class BranchBoundScanMatcher:
 
             # Branch and bound from coarsest to finest level
             score, tx, ty = self._branch_and_bound(
-                prob_grid, pts_rot, px, py, window, best_score
+                prob_grid, pts_rot, px, py, window, candidate_threshold
             )
+
+            if score > candidate_threshold:
+                top_candidates.append((float(tx), float(ty), float(theta), float(score)))
+                top_candidates.sort(key=lambda c: -c[3])
+                if len(top_candidates) > candidate_limit:
+                    del top_candidates[candidate_limit:]
+                candidate_threshold = (
+                    top_candidates[-1][3]
+                    if len(top_candidates) >= candidate_limit
+                    else float("-inf")
+                )
 
             if score > best_score:
                 best_score = score
                 best_pose = Pose2(tx, ty, theta)
 
+        if not top_candidates:
+            top_candidates = [(best_pose.x, best_pose.y, best_pose.theta, best_score)]
+
         return MatchResult(
             pose_map=best_pose,
             score=best_score,
-            candidates=[(best_pose.x, best_pose.y, best_pose.theta, best_score)],
+            candidates=top_candidates,
             diagnostics={
                 "branch_bound": {
                     "n_levels": self.cfg.n_levels,
                     "resolution_m": self.cfg.resolution_m,
                     "window_m": self.cfg.linear_window_m,
+                    "candidate_limit": candidate_limit,
+                    "n_candidates": len(top_candidates),
                 }
             },
         )
@@ -288,9 +310,9 @@ class HybridBBScanMatcher:
         icp: IcpConfig | None = None,
         refinement: HybridRefinementConfig | None = None,
     ) -> None:
+        self._refinement_cfg = refinement or HybridRefinementConfig()
         self._coarse = BranchBoundScanMatcher(branch_bound)
         self._refine = IcpScanMatcher(icp)
-        self._refinement_cfg = refinement or HybridRefinementConfig()
 
     def _distinct_enough(self, pose: Pose2, selected: list[Pose2]) -> bool:
         min_linear = max(0.0, float(self._refinement_cfg.min_linear_dist_m))
@@ -337,11 +359,13 @@ class HybridBBScanMatcher:
         self,
         *,
         scan: LaserScan,
+        prediction_map: Pose2,
         ref_points_xy_map: np.ndarray,
         predictions: list[Pose2],
     ) -> tuple[MatchResult, list[dict[str, object]], int]:
         best_idx = 0
         best_mr: MatchResult | None = None
+        best_selection_score = float("-inf")
         diags: list[dict[str, object]] = []
         for idx, pred in enumerate(predictions):
             mr = self._refine.match(
@@ -350,16 +374,26 @@ class HybridBBScanMatcher:
                 ref_points_xy_map=ref_points_xy_map,
             )
             icp_diag = mr.diagnostics.get("icp", {}) if isinstance(mr.diagnostics, dict) else {}
+            selection_score, pred_delta_m, pred_delta_yaw = _refinement_selection_score(
+                self._refinement_cfg,
+                match_score=float(mr.score),
+                pose=mr.pose_map,
+                prediction=prediction_map,
+            )
             diags.append(
                 {
                     "prediction": {"x": pred.x, "y": pred.y, "theta": pred.theta},
                     "score": float(mr.score),
+                    "selection_score": float(selection_score),
+                    "prediction_delta_m": float(pred_delta_m),
+                    "prediction_delta_yaw_rad": float(pred_delta_yaw),
                     "final_rms": icp_diag.get("final_rms"),
                 }
             )
-            if best_mr is None or mr.score > best_mr.score:
+            if best_mr is None or selection_score > best_selection_score:
                 best_idx = idx
                 best_mr = mr
+                best_selection_score = selection_score
         assert best_mr is not None
         return best_mr, diags, best_idx
 
@@ -379,6 +413,7 @@ class HybridBBScanMatcher:
         predictions = self._select_refinement_predictions(coarse)
         refined, refined_diags, best_idx = self._refine_candidates(
             scan=scan,
+            prediction_map=prediction_map,
             ref_points_xy_map=ref_points_xy_map,
             predictions=predictions,
         )

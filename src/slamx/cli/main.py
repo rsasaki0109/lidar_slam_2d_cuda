@@ -196,6 +196,12 @@ def _engine_from_config(cfg: dict[str, Any], telemetry: JsonlTelemetry | None):
             top_k=int(hybrid_refinement.get("top_k", 1)),
             min_linear_dist_m=float(hybrid_refinement.get("min_linear_dist_m", 0.0)),
             min_angular_dist_deg=float(hybrid_refinement.get("min_angular_dist_deg", 0.0)),
+            selection_translation_weight=float(
+                hybrid_refinement.get("selection_translation_weight", 0.0)
+            ),
+            selection_rotation_weight=float(
+                hybrid_refinement.get("selection_rotation_weight", 0.0)
+            ),
         ),
         hybrid_fallback=HybridFallbackConfig(
             enabled=bool(hybrid_fallback.get("enabled", False)),
@@ -217,6 +223,7 @@ def _engine_from_config(cfg: dict[str, Any], telemetry: JsonlTelemetry | None):
             angular_step_deg=float(bb.get("angular_step_deg", 1.0)),
             sigma_hit_m=float(bb.get("sigma_hit_m", 0.10)),
             min_score=float(bb.get("min_score", -0.5)),
+            candidate_limit=int(bb.get("candidate_limit", 0)),
         ),
         prediction_mode=str(pred.get("mode", "hold")),
         prediction_gain=float(pred.get("gain", 1.0)),

@@ -170,6 +170,70 @@ def test_cloud_analyze_cli_outputs_json(tmp_path: Path) -> None:
     assert rep["facts"]["baseline_vs_loop"]["hotspots"][0]["debug_target"]
 
 
+def test_cloud_analyzer_summarizes_scan_match_refinement(tmp_path: Path) -> None:
+    run = tmp_path / "run"
+    run.mkdir()
+    _write_json(
+        run / "trajectory.json",
+        [
+            {"i": 0, "x": 0.0, "y": 0.0, "theta": 0.0},
+            {"i": 1, "x": 0.1, "y": 0.0, "theta": 0.0},
+        ],
+    )
+    _write_jsonl(
+        run / "telemetry.jsonl",
+        [
+            {
+                "type": "keyframe",
+                "schema_version": 1,
+                "node": 0,
+                "stamp_ns": 0,
+                "pose": {"x": 0.0, "y": 0.0, "theta": 0.0},
+                "prediction": {"x": 0.0, "y": 0.0, "theta": 0.0},
+                "scan_match_score": 0.0,
+                "pose_jump": 0.0,
+            },
+            {
+                "type": "scan_match_candidates",
+                "schema_version": 1,
+                "node": 1,
+                "best_score": -0.1,
+                "top": [],
+                "diagnostics": {
+                    "hybrid_bb": {"best_candidate_index": 1},
+                    "coarse": {"branch_bound": {"n_candidates": 5}},
+                    "refined_candidates": [
+                        {
+                            "score": -0.10,
+                            "selection_score": -0.20,
+                            "prediction_delta_m": 0.5,
+                            "prediction_delta_yaw_rad": 0.2,
+                        },
+                        {
+                            "score": -0.11,
+                            "selection_score": -0.11,
+                            "prediction_delta_m": 0.05,
+                            "prediction_delta_yaw_rad": 0.01,
+                        },
+                    ],
+                },
+            },
+        ],
+    )
+
+    rep = CloudAnalyzer(run).analyze()
+    refinement = rep["facts"]["telemetry"]["scan_match_refinement"]
+
+    assert refinement["events"] == 1
+    assert refinement["nonzero_best_candidate_count"] == 1
+    assert refinement["coarse_candidate_count"]["max"] == 5.0
+    assert refinement["refined_candidate_count"]["max"] == 2.0
+    assert refinement["selection_changed_count"] == 1
+    assert refinement["selection_changed_nodes"] == [1]
+    assert refinement["selected_prediction_delta_m"]["max"] == 0.05
+    assert refinement["selected_prediction_delta_yaw_rad"]["max"] == 0.01
+
+
 def test_cloud_analyze_cli_outputs_hotspot_markdown(tmp_path: Path) -> None:
     baseline, looped = _make_run(tmp_path)
 

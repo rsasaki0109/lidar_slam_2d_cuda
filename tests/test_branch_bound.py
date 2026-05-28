@@ -13,7 +13,10 @@ from slamx.core.local_matching.branch_bound import (
     HybridBBScanMatcher,
     ProbabilityGrid,
 )
-from slamx.core.local_matching.hybrid import HybridRefinementConfig
+from slamx.core.local_matching.hybrid import (
+    HybridRefinementConfig,
+    _refinement_selection_score,
+)
 from slamx.core.local_matching.icp import IcpConfig
 from slamx.core.types import LaserScan, Pose2
 
@@ -184,6 +187,40 @@ class TestBranchBoundMatcher:
         ))
         assert theta_err < np.deg2rad(5.0), f"theta_err={np.rad2deg(theta_err)} deg"
 
+    def test_returns_sorted_coarse_candidates(self) -> None:
+        """B&B should expose multiple coarse hypotheses for hybrid refinement."""
+        ref = _l_shape_points()
+        true_theta = np.deg2rad(4.0)
+        c, s = np.cos(-true_theta), np.sin(-true_theta)
+        scan_pts = ref @ np.array([[c, -s], [s, c]]).T
+        scan = _make_scan(scan_pts)
+
+        cfg = BranchBoundConfig(
+            resolution_m=0.03,
+            n_levels=3,
+            linear_window_m=0.2,
+            angular_window_deg=8.0,
+            angular_step_deg=1.0,
+            sigma_hit_m=0.08,
+            candidate_limit=5,
+        )
+        matcher = BranchBoundScanMatcher(cfg)
+        result = matcher.match(
+            scan=scan,
+            prediction_map=Pose2(0.0, 0.0, 0.0),
+            ref_points_xy_map=ref,
+        )
+
+        assert 1 < len(result.candidates) <= 5
+        scores = [c[3] for c in result.candidates]
+        assert scores == sorted(scores, reverse=True)
+        assert result.candidates[0][:3] == (
+            result.pose_map.x,
+            result.pose_map.y,
+            result.pose_map.theta,
+        )
+        assert len({round(c[2], 6) for c in result.candidates}) > 1
+
     def test_beats_exhaustive_on_l_shape(self) -> None:
         """B&B should find similar or better result as exhaustive grid search on L-shape."""
         ref = _l_shape_points()
@@ -256,6 +293,28 @@ class TestBranchBoundMatcher:
 
 
 class TestHybridBBMatcher:
+    def test_refinement_selection_score_penalizes_motion_prior(self) -> None:
+        cfg = HybridRefinementConfig(
+            selection_translation_weight=1.0,
+            selection_rotation_weight=1.0,
+        )
+        prediction = Pose2(0.0, 0.0, 0.0)
+
+        near_score, _, _ = _refinement_selection_score(
+            cfg,
+            match_score=-0.10,
+            pose=Pose2(0.0, 0.0, 0.0),
+            prediction=prediction,
+        )
+        far_score, _, _ = _refinement_selection_score(
+            cfg,
+            match_score=-0.05,
+            pose=Pose2(1.0, 0.0, 0.2),
+            prediction=prediction,
+        )
+
+        assert near_score > far_score
+
     def test_hybrid_bb_icp(self) -> None:
         """B&B coarse + ICP refine should work end-to-end."""
         ref = _l_shape_points()
