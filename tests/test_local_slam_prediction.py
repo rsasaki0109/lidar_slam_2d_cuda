@@ -50,6 +50,23 @@ class LoopOnce:
         ]
 
 
+class LoopRejected:
+    def detect_and_match(self, **kwargs) -> list[LoopClosureResult]:
+        node = int(kwargs["node_id"])
+        if node != 2:
+            return []
+        return [
+            LoopClosureResult(
+                i=0,
+                j=node,
+                score=-0.2,
+                accepted=False,
+                rel_ij=Pose2(2.0, 0.0, 0.0),
+                diagnostics={"acceptance": {"reject_reason": "icp_rms"}},
+            )
+        ]
+
+
 def _scan(stamp_ns: int) -> LaserScan:
     return LaserScan(
         stamp_ns=stamp_ns,
@@ -116,3 +133,35 @@ def test_loop_closure_can_trigger_low_budget_optimization() -> None:
     assert len(opts) == 1
     assert opts[0]["reason"] == "loop_closure"
     assert opts[0]["max_nfev"] == 32
+
+
+def test_rejected_loop_telemetry_keeps_relative_pose_and_reason() -> None:
+    telemetry = RecordingTelemetry()
+    eng = LocalSlamEngine(
+        cfg=LocalSlamConfig(
+            prediction_mode="constant_velocity",
+            optimize_every_n_keyframes=0,
+        ),
+        telemetry=telemetry,  # type: ignore[arg-type]
+    )
+    eng._matcher = RecordingMatcher([Pose2(1.0, 0.0, 0.0), Pose2(2.0, 0.0, 0.0)])
+    eng._heuristic_loop = LoopRejected()  # type: ignore[assignment]
+
+    eng.handle_scan(_scan(0))
+    eng.handle_scan(_scan(1))
+    eng.handle_scan(_scan(2))
+
+    candidate_events = [
+        e for e in telemetry.events if e["type"] == "loop_closure_candidates"
+    ]
+    rejected = [e for e in telemetry.events if e["type"] == "loop_closure_rejected"]
+    accepted = [e for e in telemetry.events if e["type"] == "loop_closure_accepted"]
+
+    assert accepted == []
+    assert candidate_events[0]["candidates"][0]["rel_ij"] == {
+        "x": 2.0,
+        "y": 0.0,
+        "theta": 0.0,
+    }
+    assert rejected[0]["rel_ij"] == {"x": 2.0, "y": 0.0, "theta": 0.0}
+    assert rejected[0]["reason"] == "icp_rms"
