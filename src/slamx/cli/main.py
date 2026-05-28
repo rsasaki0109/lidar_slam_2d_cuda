@@ -1287,6 +1287,13 @@ def cloud_analyze(
         int,
         typer.Option("--hotspot-limit", help="Maximum automatic drift hotspots to report"),
     ] = 5,
+    scan_match_hotspots: Annotated[
+        int,
+        typer.Option(
+            "--scan-match-hotspots",
+            help="Emit the top-N keyframes ranked by pose_jump with scan-match diagnostics",
+        ),
+    ] = 0,
 ) -> None:
     """Analyze loop-closure viability and LiDAR odometry drift from run artifacts."""
     rep = cloud_analyzer.CloudAnalyzer(
@@ -1294,6 +1301,7 @@ def cloud_analyze(
         baseline_run=baseline_run,
         hotspot_window_nodes=hotspot_window_nodes,
         hotspot_limit=hotspot_limit,
+        scan_match_hotspots=scan_match_hotspots,
     ).analyze()
     if markdown:
         typer.echo(cloud_analyzer.render_markdown(rep))
