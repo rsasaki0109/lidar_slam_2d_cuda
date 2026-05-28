@@ -85,3 +85,45 @@ env -u PYTHONPATH -u AMENT_PREFIX_PATH .venv/bin/slamx cloud-analyze \
 
 - 本テーブルは新フラグ `cloud-analyze --scan-match-hotspots N` (今回 PR で追加) の出力で再生成可能。
 - plan.md Task 1 「指定 8 ノード (3771, 3941, 1032, 1176, 940, 1094, 936, 937)」はすべて top 8 に入っている。
+
+## 追記 (2026-05-29): cloud-hotspot による系統ドリフト確認
+
+`cloud-hotspot` で loop run と no-loop baseline を複数窓比較した結果、上の per-node 診断を補強する事実が出た。
+
+| 窓 | drift growth | delta local frame | loop events |
+|---|---|---|---|
+| 3740–3760 | -0.091 m | long -0.078, lat 0.058, yaw 0.96° | cand2 acc2 |
+| 1065–1100 | 0.003 m | long 0.096, lat -0.069, yaw -0.72° | cand4 acc2 rej2 |
+| 3941–3975 | -0.071 m | long 0.073, lat -0.028, yaw -0.72° | cand4 acc1 rej3 |
+| 200–260 (loop無) | 0.061 m | long 0.012, lat -0.076, yaw -1.13° | なし |
+
+全窓で finding が一致: **"drift grows while local scan-match metrics look normal"**、補正は longitudinal / lateral 主体。ループイベントの無いクリーン窓 (200–260) でも同じ。
+
+結論の補強:
+- 残差は「ホットスポット単独ノードの大ジャンプ」ではなく、**各ステップの小さな並進/yaw 系統バイアスが積分されたドリフト**。
+- したがって per-node の狭いルール (Direction A/B) では full-run ATE はほぼ動かない。**レバーは系統的予測=Direction C**。
+- 予測モデルの実態: `local_slam._predict_pose` は `prediction_mode=constant_velocity`, `gain=1.0` で **直近 1 ステップの `last_rel` のみ**を外挿。yaw-rate 推定が単一ステップ依存でノイズに弱い。旋回中の `pred_dyaw` 残差はこれが主因。
+- 次の候補: **直近 k ステップのロバスト yaw-rate (median) で予測を強化** (opt-in)。ただし plan.md の過去 gain tuning は full ATE を悪化させた実績があるため、2k→full no-loop→full loop のゲート全段を通すこと。
+
+## 追記 (2026-05-29): Direction C (k-step yaw-rate 予測) を実装・2k 検証 → 棄却
+
+`LocalSlamConfig.prediction_yaw_window` を追加 (既定 0=OFF)。ON のとき `_predict_pose` の yaw 増分を直近 N ステップの per-step yaw 差のロバスト中央値で置換 (並進は constant_velocity のまま)。config キー `slam.prediction.yaw_window`。単体テスト `tests/test_local_slam_prediction.py` に 2 件追加。
+
+2k 検証 (`--max-scans 2000`, deterministic seed 0, GT=elevator/ground_truth.tum):
+
+| 指標 | baseline yawtop3 | yaw_window=5 | yaw_window=3 |
+|---|---|---|---|
+| align ATE (m) | 0.01309 | 0.01373 (+4.9%) | 0.01709 (+30.6%) |
+| no-align ATE (m) | 0.01563 | 0.01674 (+7.1%) | 0.02276 (+45.6%) |
+| jump p50 (m) | 0.0468 | 0.0357 | 0.0358 |
+| jump p90 (m) | 0.0891 | 0.0792 | 0.0795 |
+| jump max (m) | 0.2170 | 0.1491 | 0.1668 |
+
+判定: **棄却**。
+- 両窓とも jump p50/p90/max は改善するが、2k 必須ゲート「align/no-align ATE を悪化させない」を不通過。
+- `window=3 < window=5` で ATE がさらに悪化 (中央値が反応的でノイジー) → 窓拡大は遅延増、窓縮小はノイズ増で、どちらも baseline ATE を下回らない。
+- これは plan.md の `True B&B Candidate Expansion` / `Selection Prior Only` / `Prediction Gain Experiments` と同一の「局所平滑↑・ATE↓」失敗モード。
+- 結論: no-loop オドメトリは現行 matcher/prediction 構造ではほぼ収束済み。残差はループ閉じ込めが処理する系統ドリフトであり、予測平滑では ATE を改善できない。full replay には進まない (2k ゲート不通過で打ち切り)。
+
+関連実験 run: `runs/iilabs_elevator_s2k_vscan_bb_yawtop3_yawwin5_20260529`, `..._yawwin3_20260529`。
+config: `configs/iilabs_vscan_bb_yawtop3_yawwin5.yaml`, `..._yawwin3.yaml`。
