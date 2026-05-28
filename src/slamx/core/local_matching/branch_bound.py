@@ -16,7 +16,11 @@ import numpy as np
 from scipy.ndimage import gaussian_filter
 
 from slamx.core.local_matching.icp import IcpConfig, IcpScanMatcher
-from slamx.core.local_matching.hybrid import HybridRefinementConfig, _refinement_selection_score
+from slamx.core.local_matching.hybrid import (
+    HybridRefinementConfig,
+    _apply_prediction_yaw_tiebreak,
+    _refinement_selection_score,
+)
 from slamx.core.types import LaserScan, MatchResult, Pose2
 
 
@@ -362,10 +366,10 @@ class HybridBBScanMatcher:
         prediction_map: Pose2,
         ref_points_xy_map: np.ndarray,
         predictions: list[Pose2],
-    ) -> tuple[MatchResult, list[dict[str, object]], int]:
+    ) -> tuple[MatchResult, list[dict[str, object]], int, dict[str, object]]:
         best_idx = 0
-        best_mr: MatchResult | None = None
         best_selection_score = float("-inf")
+        mrs: list[MatchResult] = []
         diags: list[dict[str, object]] = []
         for idx, pred in enumerate(predictions):
             mr = self._refine.match(
@@ -390,12 +394,15 @@ class HybridBBScanMatcher:
                     "final_rms": icp_diag.get("final_rms"),
                 }
             )
-            if best_mr is None or selection_score > best_selection_score:
+            mrs.append(mr)
+            if idx == 0 or selection_score > best_selection_score:
                 best_idx = idx
-                best_mr = mr
                 best_selection_score = selection_score
-        assert best_mr is not None
-        return best_mr, diags, best_idx
+        assert mrs, "predictions must be non-empty"
+        best_idx, tiebreak_diag = _apply_prediction_yaw_tiebreak(
+            self._refinement_cfg, diags, best_idx
+        )
+        return mrs[best_idx], diags, best_idx, tiebreak_diag
 
     def match(
         self,
@@ -411,7 +418,7 @@ class HybridBBScanMatcher:
         )
 
         predictions = self._select_refinement_predictions(coarse)
-        refined, refined_diags, best_idx = self._refine_candidates(
+        refined, refined_diags, best_idx, tiebreak_diag = self._refine_candidates(
             scan=scan,
             prediction_map=prediction_map,
             ref_points_xy_map=ref_points_xy_map,
@@ -432,5 +439,6 @@ class HybridBBScanMatcher:
                 "coarse": coarse.diagnostics,
                 "refined": refined.diagnostics,
                 "refined_candidates": refined_diags,
+                "tiebreak": tiebreak_diag,
             },
         )
