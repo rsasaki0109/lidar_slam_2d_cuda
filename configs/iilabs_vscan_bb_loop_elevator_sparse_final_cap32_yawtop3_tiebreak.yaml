@@ -1,0 +1,71 @@
+slam:
+  virtual_scan:
+    z_min: -0.1
+    z_max: 0.3
+    angular_resolution_deg: 0.5
+    max_range: 10.0
+  preprocess:
+    max_range: 10.0
+    stride: 1
+  local_matching:
+    type: hybrid_bb
+    branch_bound:
+      resolution_m: 0.05
+      n_levels: 4
+      linear_window_m: 0.3
+      angular_window_deg: 20.0
+      angular_step_deg: 1.0
+      sigma_hit_m: 0.10
+    icp:
+      max_iterations: 15
+      max_correspondence_dist_m: 0.75
+      min_correspondences: 50
+      trim_fraction: 0.10
+    hybrid_refinement:
+      top_k: 3
+      min_angular_dist_deg: 1.0
+      prediction_yaw_tiebreak_enabled: true
+      tiebreak_score_eps: 0.002
+      tiebreak_rms_eps: 0.005
+      tiebreak_yaw_margin_rad: 0.0087
+  prediction:
+    mode: constant_velocity
+    gain: 1.0
+  submap:
+    max_submap_scans: 35
+    downsample_stride: 1
+  optimize_every_n_keyframes: 50
+  optimize_adaptive_from_node: 500
+  optimize_min_interval_for_long_runs: 500
+  pose_graph_skip_optimization_from_node: 3499
+  final_optimize_at_end: true
+  loop_detection:
+    enabled: true
+    detect_every_n: 25
+    search_radius_m: 2.0
+    min_separation_nodes: 200
+    max_candidates: 2
+    accept_score: -2.0
+    icp_accept_rms: 0.10
+    correlative_grid:
+      linear_step_m: 0.05
+      angular_step_deg: 2.0
+      # Widened from 0.50 / 30.0 to absorb the larger pre-optimization
+      # odometry prior error introduced by the tiebreak-enabled odometry.
+      # Without this, late-trajectory loop candidates (e.g. node 5000 -> node
+      # 67) score below `accept_score=-2.0` because the true match peak sits
+      # outside the linear search window, producing a uniformly poor score.
+      linear_window_m: 1.50
+      angular_window_deg: 30.0
+      sigma_hit_m: 0.15
+    icp:
+      max_iterations: 15
+      max_correspondence_dist_m: 1.0
+      min_correspondences: 30
+      trim_fraction: 0.15
+  pose_graph:
+    max_iterations: 1
+    max_nfev_cap: 128
+  final_pose_graph:
+    max_iterations: 1
+    max_nfev_cap: 32
