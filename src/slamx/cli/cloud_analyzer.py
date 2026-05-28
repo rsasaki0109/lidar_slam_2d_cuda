@@ -705,6 +705,133 @@ def _keyframe_metrics_by_node(evs: list[dict[str, Any]]) -> dict[int, dict[str, 
     return rows
 
 
+def _scan_match_diagnostics_by_node(
+    evs: list[dict[str, Any]],
+) -> dict[int, dict[str, Any]]:
+    rows: dict[int, dict[str, Any]] = {}
+    for e in evs:
+        if e.get("type") != "scan_match_candidates":
+            continue
+        node = int(e.get("node", -1))
+        diag = e.get("diagnostics") or {}
+        if not isinstance(diag, dict):
+            continue
+        hybrid = diag.get("hybrid_bb") or diag.get("hybrid") or {}
+        coarse = diag.get("coarse") or {}
+        branch_bound = coarse.get("branch_bound") if isinstance(coarse, dict) else {}
+        refined_block = diag.get("refined") or {}
+        icp_block = refined_block.get("icp") if isinstance(refined_block, dict) else {}
+        refined = diag.get("refined_candidates") or []
+
+        best_idx: int | None = None
+        if isinstance(hybrid, dict) and "best_candidate_index" in hybrid:
+            try:
+                best_idx = int(hybrid["best_candidate_index"])
+            except Exception:
+                best_idx = None
+
+        n_coarse: int | None = None
+        if isinstance(branch_bound, dict) and "n_candidates" in branch_bound:
+            try:
+                n_coarse = int(branch_bound["n_candidates"])
+            except Exception:
+                n_coarse = None
+
+        n_refined = len(refined) if isinstance(refined, list) else None
+        refined_score_best: float | None = None
+        refined_score_gap: float | None = None
+        refined_rms_best: float | None = None
+        sel_pred_delta_m: float | None = None
+        sel_pred_delta_yaw_rad: float | None = None
+        if isinstance(refined, list) and refined:
+            scores: list[float] = []
+            for r in refined:
+                if isinstance(r, dict) and "score" in r:
+                    try:
+                        scores.append(float(r["score"]))
+                    except Exception:
+                        pass
+            if scores:
+                scores_sorted = sorted(scores, reverse=True)
+                refined_score_best = scores_sorted[0]
+                if len(scores_sorted) >= 2:
+                    refined_score_gap = scores_sorted[0] - scores_sorted[1]
+            if best_idx is not None and 0 <= best_idx < len(refined):
+                sel = refined[best_idx]
+                if isinstance(sel, dict):
+                    if "final_rms" in sel:
+                        try:
+                            refined_rms_best = float(sel["final_rms"])
+                        except Exception:
+                            pass
+                    if "prediction_delta_m" in sel:
+                        try:
+                            sel_pred_delta_m = float(sel["prediction_delta_m"])
+                        except Exception:
+                            pass
+                    if "prediction_delta_yaw_rad" in sel:
+                        try:
+                            sel_pred_delta_yaw_rad = float(sel["prediction_delta_yaw_rad"])
+                        except Exception:
+                            pass
+
+        icp_final_rms: float | None = None
+        if isinstance(icp_block, dict) and "final_rms" in icp_block:
+            try:
+                icp_final_rms = float(icp_block["final_rms"])
+            except Exception:
+                icp_final_rms = None
+        if refined_rms_best is None:
+            refined_rms_best = icp_final_rms
+
+        rows[node] = {
+            "best_candidate_index": best_idx,
+            "n_refined_candidates": n_refined,
+            "n_coarse_candidates": n_coarse,
+            "refined_score_best": refined_score_best,
+            "refined_score_gap": refined_score_gap,
+            "refined_rms_best": refined_rms_best,
+            "icp_final_rms": icp_final_rms,
+            "selected_prediction_delta_m": sel_pred_delta_m,
+            "selected_prediction_delta_yaw_rad": sel_pred_delta_yaw_rad,
+        }
+    return rows
+
+
+def _scan_match_hotspot_rows(
+    evs: list[dict[str, Any]], top_n: int
+) -> list[dict[str, Any]]:
+    if top_n <= 0:
+        return []
+    kf_metrics = _keyframe_metrics_by_node(evs)
+    scan_diag = _scan_match_diagnostics_by_node(evs)
+    rows: list[dict[str, Any]] = []
+    for node, kf in kf_metrics.items():
+        sd = scan_diag.get(node, {})
+        rows.append(
+            {
+                "node": int(node),
+                "pose_jump": float(kf.get("pose_jump", 0.0)),
+                "scan_match_score": float(kf.get("scan_match_score", 0.0)),
+                "prediction_delta_m": kf.get("prediction_error_m"),
+                "prediction_delta_yaw_rad": kf.get("prediction_error_yaw_rad"),
+                "best_candidate_index": sd.get("best_candidate_index"),
+                "n_refined_candidates": sd.get("n_refined_candidates"),
+                "n_coarse_candidates": sd.get("n_coarse_candidates"),
+                "refined_score_best": sd.get("refined_score_best"),
+                "refined_score_gap": sd.get("refined_score_gap"),
+                "refined_rms_best": sd.get("refined_rms_best"),
+                "icp_final_rms": sd.get("icp_final_rms"),
+                "selected_prediction_delta_m": sd.get("selected_prediction_delta_m"),
+                "selected_prediction_delta_yaw_rad": sd.get(
+                    "selected_prediction_delta_yaw_rad"
+                ),
+            }
+        )
+    rows.sort(key=lambda r: r["pose_jump"], reverse=True)
+    return rows[:top_n]
+
+
 def _loop_events_by_node(evs: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
     rows: dict[int, dict[str, Any]] = {}
 
@@ -779,12 +906,14 @@ class CloudAnalyzer:
         thresholds: CloudAnalyzerThresholds | None = None,
         hotspot_window_nodes: int = 100,
         hotspot_limit: int = 5,
+        scan_match_hotspots: int = 0,
     ) -> None:
         self.run_dir = run_dir
         self.baseline_run = baseline_run
         self.thresholds = thresholds or CloudAnalyzerThresholds()
         self.hotspot_window_nodes = int(hotspot_window_nodes)
         self.hotspot_limit = int(hotspot_limit)
+        self.scan_match_hotspots = int(scan_match_hotspots)
 
     def analyze(self) -> dict[str, Any]:
         traj_path = _run_file(self.run_dir, "trajectory.json")
@@ -816,6 +945,10 @@ class CloudAnalyzer:
         evs = load_jsonl(telem_path)
 
         telemetry = self._telemetry_facts(evs)
+        if self.scan_match_hotspots > 0:
+            telemetry["scan_match_hotspots"] = _scan_match_hotspot_rows(
+                evs, self.scan_match_hotspots
+            )
         trajectory = _trajectory_summary(traj)
         out["facts"] = {
             "trajectory": trajectory,
@@ -1784,6 +1917,12 @@ def _fmt_optional(value: Any) -> str:
     return f"{float(value):.3f}"
 
 
+def _fmt_optional_int(value: Any) -> str:
+    if value is None:
+        return "-"
+    return str(int(value))
+
+
 def render_markdown(rep: dict[str, Any]) -> str:
     facts = rep.get("facts", {})
     telemetry = facts.get("telemetry", {})
@@ -1886,6 +2025,33 @@ def render_markdown(rep: dict[str, Any]) -> str:
                     f"{h.get('debug_target', 'unknown')} | "
                     f"{h.get('failure_mode', 'unknown')} |"
                 )
+    scan_hotspots = telemetry.get("scan_match_hotspots") or []
+    if scan_hotspots:
+        lines.extend(
+            [
+                "",
+                f"## Scan-Match Hotspots (top {len(scan_hotspots)} by pose_jump)",
+                "",
+                (
+                    "| node | pose_jump_m | score | pred_dx_m | pred_dyaw_rad | "
+                    "icp_rms | best_idx | n_ref | score_gap |"
+                ),
+                "|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+            ]
+        )
+        for r in scan_hotspots:
+            lines.append(
+                "| "
+                f"{int(r['node'])} | "
+                f"{float(r['pose_jump']):.3f} | "
+                f"{float(r['scan_match_score']):.4f} | "
+                f"{_fmt_optional(r.get('prediction_delta_m'))} | "
+                f"{_fmt_optional(r.get('prediction_delta_yaw_rad'))} | "
+                f"{_fmt_optional(r.get('refined_rms_best'))} | "
+                f"{_fmt_optional_int(r.get('best_candidate_index'))} | "
+                f"{_fmt_optional_int(r.get('n_refined_candidates'))} | "
+                f"{_fmt_optional(r.get('refined_score_gap'))} |"
+            )
     lines.append("")
     lines.append("## Findings")
     for f in rep.get("findings", []):
